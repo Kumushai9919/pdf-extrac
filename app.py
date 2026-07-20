@@ -9,6 +9,7 @@ Run:
 """
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 from datetime import date
@@ -17,8 +18,9 @@ import fitz  # PyMuPDF
 import pandas as pd
 import streamlit as st
 
-from main import (COLUMNS, IMG_COLS, extract_records, ocr_available,
-                  write_excel)
+from main import (COLUMNS, IMG_COLS, extract_records, merge_excel_bytes,
+                  ocr_available, write_excel)
+from templates import TEMPLATES, DEFAULT_TEMPLATE
 
 st.set_page_config(page_title="물류센터 PDF → Excel 추출기",
                    page_icon="📄", layout="wide")
@@ -46,8 +48,9 @@ def build_row(rec: dict, broker: str, info_date: str) -> dict:
     }
 
 
-def run_extraction(pdf_bytes: bytes, broker: str, info_date: str,
-                   img_width: int, dpi: int, img_dpi: int) -> dict | None:
+def run_extraction(pdf_bytes: bytes, template_name: str, broker: str,
+                   info_date: str, img_width: int, dpi: int,
+                   img_dpi: int) -> dict | None:
     """Parse the PDF and return everything the UI needs (all in-memory).
 
     The PDF is read from memory and never written to disk; the cropped images
@@ -65,7 +68,9 @@ def run_extraction(pdf_bytes: bytes, broker: str, info_date: str,
     with tempfile.TemporaryDirectory() as tmp:  # auto-removed on block exit
         img_dir = os.path.join(tmp, "imgs")
         records, skipped = extract_records(doc, img_dir, dpi=dpi,
-                                           img_dpi=img_dpi, progress=on_progress)
+                           img_dpi=img_dpi,
+                           progress=on_progress,
+                           template_name=template)
         bar.empty()
         if not records:
             return None
@@ -109,8 +114,11 @@ if not ocr_available():
 
 with st.sidebar:
     st.header("옵션")
-    broker = st.text_input("중개인/임대인명", value="",
-                           help="모든 행에 채워질 값입니다 (예: S1).")
+    template = st.selectbox("브로커 템플릿 선택", list(TEMPLATES.keys()),
+                            index=list(TEMPLATES.keys()).index(DEFAULT_TEMPLATE),
+                            help="PDF 레이아웃에 맞는 브로커 템플릿을 선택하세요.")
+    broker = TEMPLATES[template].get("label", template)
+    st.markdown(f"**중개인/임대인명:** {broker}")
     info_date = st.date_input("정보 확인일자", value=date.today()).strftime("%d/%m/%Y")
     img_width = st.slider("엑셀 이미지 너비(px)", 200, 600, 360, 20)
     with st.expander("고급 설정"):
@@ -121,12 +129,12 @@ uploaded = st.file_uploader("PDF 파일을 여기에 끌어다 놓으세요", ty
                             accept_multiple_files=False)
 
 if uploaded is not None:
-    file_sig = (uploaded.name, uploaded.size, broker, info_date,
+    file_sig = (uploaded.name, uploaded.size, template, broker, info_date,
                 img_width, img_dpi, ocr_dpi)
     if st.session_state.get("sig") != file_sig:
         with st.spinner(f"'{uploaded.name}' 분석 중…"):
-            result = run_extraction(uploaded.getvalue(), broker, info_date,
-                                    img_width, ocr_dpi, img_dpi)
+            result = run_extraction(uploaded.getvalue(), template, broker,
+                                    info_date, img_width, ocr_dpi, img_dpi)
         st.session_state["sig"] = file_sig
         st.session_state["result"] = result
         st.session_state["name"] = uploaded.name
@@ -162,3 +170,32 @@ elif result is not None:
         st.divider()
 else:
     st.info("좌측에서 옵션을 설정한 뒤 PDF를 업로드하세요.")
+
+st.markdown("---")
+st.header("📥 엑셀 파일 병합")
+merge_excels = st.file_uploader(
+    "병합할 Excel 파일들을 모두 업로드하세요.", type=["xlsx"],
+    accept_multiple_files=True,
+    help="여러 브로커별 엑셀 파일을 한 번에 선택하면 하나의 통합 워크북으로 병합합니다.")
+
+if merge_excels:
+    if len(merge_excels) < 2:
+        st.info("2개 이상의 Excel 파일을 업로드해야 병합할 수 있습니다.")
+    else:
+        if st.button("📦 엑셀 병합"):
+            with st.spinner("엑셀 파일을 병합하는 중…"):
+                workbook_bytes = [uploaded.getvalue() for uploaded in merge_excels]
+                try:
+                    merged_bytes = merge_excel_bytes(workbook_bytes)
+                    download_name = "merged_workbook.xlsx"
+                    st.success(f"{len(merge_excels)}개의 엑셀 파일을 성공적으로 병합했습니다.")
+                    st.download_button(
+                        "⬇️ 병합된 엑셀 파일 다운로드",
+                        data=merged_bytes,
+                        file_name=download_name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        width="stretch",
+                    )
+                except Exception as exc:
+                    st.error(f"엑셀 병합에 실패했습니다: {exc}")
