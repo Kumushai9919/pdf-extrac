@@ -124,6 +124,33 @@ with st.sidebar:
     with st.expander("고급 설정"):
         img_dpi = st.slider("이미지 렌더 DPI", 100, 300, 150, 10)
         ocr_dpi = st.slider("OCR 렌더 DPI (스캔 PDF)", 150, 400, 300, 10)
+    # Sidebar: add quick access to Excel merge at the bottom
+    st.markdown("---")
+    st.header("📥 엑셀 파일 병합")
+    merge_excels_sb = st.file_uploader(
+        "병합할 Excel 파일들을 모두 업로드하세요.", type=["xlsx"],
+        accept_multiple_files=True, key="merge_sidebar",
+        help="여러 브로커별 엑셀 파일을 한 번에 선택하면 하나의 통합 워크북으로 병합합니다.")
+
+    if merge_excels_sb:
+        if len(merge_excels_sb) < 2:
+            st.info("2개 이상의 Excel 파일을 업로드해야 병합할 수 있습니다.")
+        else:
+            if st.button("📦 엑셀 병합 (사이드바)", key="merge_sidebar_btn"):
+                with st.spinner("엑셀 파일을 병합하는 중…"):
+                    workbook_bytes = [f.getvalue() for f in merge_excels_sb]
+                    try:
+                        merged_bytes = merge_excel_bytes(workbook_bytes)
+                        st.success(f"{len(merge_excels_sb)}개의 엑셀 파일을 성공적으로 병합했습니다.")
+                        st.download_button(
+                            "⬇️ 병합된 엑셀 파일 다운로드",
+                            data=merged_bytes,
+                            file_name="merged_workbook.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="merge_sidebar_dl",
+                        )
+                    except Exception as exc:
+                        st.error(f"엑셀 병합에 실패했습니다: {exc}")
 
 uploaded = st.file_uploader("PDF 파일을 여기에 끌어다 놓으세요", type=["pdf"],
                             accept_multiple_files=False)
