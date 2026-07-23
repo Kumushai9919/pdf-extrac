@@ -30,5 +30,49 @@ TEMPLATES = {
         "SPEC_BOX": {"x0": 0.645, "x1": 0.978, "y0": 0.885, "y1": 0.960},
         "OCR_LANG": "kor+eng",
     },
+
+    "CBRE": {
+        "name": "CBRE",
+        "label": "CBRE",
+        "keywords": [
+            "CBRE",
+            "Logistics Center",
+            "Building Information",
+            "Available for Lease",
+            "화성JW 물류센터",
+        ],
+        "GI_BOX": {
+            "x0": 0.400,
+            "x1": 0.705,
+            "y0": 0.205,
+            "y1": 0.585,
+        },
+        "GI_VALUE_X": 0.510,
+        "TITLE_BOX": {
+            "x0": 0.020,
+            "x1": 0.600,
+            "y0": 0.100,
+            "y1": 0.180,
+        },
+        "PHOTO_BOX": {
+            "x0": 0.023,
+            "x1": 0.385,
+            "y0": 0.235,
+            "y1": 0.585,
+        },
+        "SPACE_BOX": {
+            "x0": 0.400,
+            "x1": 0.963,
+            "y0": 0.588,
+            "y1": 0.958,
+        },
+        "SPEC_BOX": {
+            "x0": 0.505,
+            "x1": 0.705,
+            "y0": 0.535,
+            "y1": 0.585,
+        },
+        "OCR_LANG": "kor+eng",
+    },
 }
 DEFAULT_TEMPLATE = "MOVE"

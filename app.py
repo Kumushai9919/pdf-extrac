@@ -122,8 +122,10 @@ with st.sidebar:
     info_date = st.date_input("정보 확인일자", value=date.today()).strftime("%d/%m/%Y")
     img_width = st.slider("엑셀 이미지 너비(px)", 200, 600, 360, 20)
     with st.expander("고급 설정"):
-        img_dpi = st.slider("이미지 렌더 DPI", 100, 300, 150, 10)
-        ocr_dpi = st.slider("OCR 렌더 DPI (스캔 PDF)", 150, 400, 300, 10)
+        img_dpi = st.slider("이미지 렌더 DPI", 100, 600, 300, 50,
+                            help="값이 클수록 이미지 품질이 좋아지지만 처리 시간이 길어집니다.")
+        ocr_dpi = st.slider("OCR 렌더 DPI (스캔 PDF)", 150, 600, 300, 50,
+                            help="값이 클수록 OCR 정확도가 개선되지만 렌더 시간이 늘어납니다.")
     # Sidebar: add quick access to Excel merge at the bottom
     st.markdown("---")
     st.header("📥 엑셀 파일 병합")

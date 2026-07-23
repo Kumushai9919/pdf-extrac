@@ -11,3 +11,4 @@ dsv_main_images/
 *.pdf
 *.xlsx
 ~$*
+debug/

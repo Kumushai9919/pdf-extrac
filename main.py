@@ -43,8 +43,15 @@ from io import BytesIO
 import fitz  # PyMuPDF
 import numpy as np
 import pytesseract
+try:
+    import xlsxwriter
+except ImportError as exc:
+    raise ImportError(
+        "XlsxWriter is required to write the Excel output. "
+        "Activate the project virtual environment and install it with: "
+        "python -m pip install XlsxWriter"
+    ) from exc
 from openpyxl import Workbook, load_workbook
-from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from PIL import Image
@@ -66,6 +73,7 @@ GI_FIELDS = ["소재지", "인근IC", "건폐율/용적률", "대지면적",
 # Common label synonyms that appear in some broker templates -> canonical GI_FIELDS
 GI_SYNONYMS = {
     "주소": "소재지",
+    "위치": "소재지",
     "준공시기": "준공년도",
     "준공연도": "준공년도",
     "주차대수": "주차",
@@ -635,36 +643,32 @@ def extract_text_page(page: "fitz.Page", page_idx: int,
 # ---------------------------------------------------------------------------
 # Excel writing
 # ---------------------------------------------------------------------------
-def px_to_col_width(px: int) -> float:
-    return max(px / 7.0, 8)
-
-
-def px_to_row_height(px: int) -> float:
-    return px * 0.75  # px -> points (96dpi -> 72pt)
-
-
 def write_excel(records: list[dict], out_path: str, broker: str,
                 info_date: str, img_target_w: int) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Warehouses"
+    workbook = xlsxwriter.Workbook(out_path)
+    ws = workbook.add_worksheet("Warehouses")
 
-    header_fill = PatternFill("solid", fgColor="2F5597")
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    thin = Side(style="thin", color="BFBFBF")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    wrap_top = Alignment(wrap_text=True, vertical="top")
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    header_format = workbook.add_format({
+        "bold": True,
+        "align": "center",
+        "valign": "vcenter",
+        "text_wrap": True,
+        "fg_color": "#2F5597",
+        "font_color": "#FFFFFF",
+        "border": 1,
+    })
+    cell_format = workbook.add_format({
+        "align": "left",
+        "valign": "top",
+        "text_wrap": True,
+        "border": 1,
+    })
 
-    for c, name in enumerate(COLUMNS, start=1):
-        cell = ws.cell(row=1, column=c, value=name)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = center
-        cell.border = border
+    for c, name in enumerate(COLUMNS):
+        ws.write(0, c, name, header_format)
+    ws.set_row_pixels(0, 24)
 
     col_index = {name: i + 1 for i, name in enumerate(COLUMNS)}
-    # Reasonable default widths for text columns.
     default_widths = {
         "사용가능여부": 12, "중개인/임대인명": 14, "창고명": 26, "주소": 26,
         "행정구역_도": 14, "행정구역_시": 12, "대지면적": 20, "연면적": 20,
@@ -672,10 +676,13 @@ def write_excel(records: list[dict], out_path: str, broker: str,
         "정보확인일자": 14,
     }
     for name, width in default_widths.items():
-        ws.column_dimensions[get_column_letter(col_index[name])].width = width
+        ws.set_column(col_index[name] - 1, col_index[name] - 1, width)
 
-    max_row_px = 0
-    for r, rec in enumerate(records, start=2):
+    image_columns = ["공실현황", "사진"]
+    for name in image_columns:
+        ws.set_column_pixels(col_index[name] - 1, col_index[name] - 1, img_target_w)
+
+    for row_idx, rec in enumerate(records, start=1):
         row_values = {
             "사용가능여부": "",
             "중개인/임대인명": broker,
@@ -693,28 +700,31 @@ def write_excel(records: list[dict], out_path: str, broker: str,
             "정보확인일자": info_date,
             "사진": "",
         }
-        for name, value in row_values.items():
-            cell = ws.cell(row=r, column=col_index[name], value=value)
-            cell.alignment = wrap_top
-            cell.border = border
+        max_row_px = 24
 
-        # Embed the two images, scaled to a common target width.
+        for name, value in row_values.items():
+            ws.write(row_idx, col_index[name] - 1, value, cell_format)
+
         for name, path in (("공실현황", rec["_space"]), ("사진", rec["_photo"])):
+            if not path:
+                continue
+
             with Image.open(path) as im:
                 ow, oh = im.size
+            if ow == 0:
+                continue
+
             scale = img_target_w / ow
-            sw, sh = int(ow * scale), int(oh * scale)
-            xl = XLImage(path)
-            xl.width, xl.height = sw, sh
-            col_letter = get_column_letter(col_index[name])
-            ws.column_dimensions[col_letter].width = px_to_col_width(sw)
-            ws.add_image(xl, f"{col_letter}{r}")
-            max_row_px = max(max_row_px, sh)
+            scaled_height = int(oh * scale)
+            max_row_px = max(max_row_px, scaled_height + 10)
 
-        ws.row_dimensions[r].height = px_to_row_height(max_row_px + 8)
+            ws.embed_image(row_idx, col_index[name] - 1, path,
+                           {"description": name, "x_scale": scale, "y_scale": scale})
 
-    ws.freeze_panes = "A2"
-    wb.save(out_path)
+        ws.set_row_pixels(row_idx, max_row_px)
+
+    ws.freeze_panes(1, 0)
+    workbook.close()
 
 
 def merge_excel_bytes(workbook_bytes: list[bytes]) -> bytes:
@@ -787,22 +797,18 @@ def merge_excel_bytes(workbook_bytes: list[bytes]) -> bytes:
                     image_bytes = img.ref.read() if hasattr(img.ref, "read") else None
                     merged_image = XLImage(BytesIO(image_bytes) if image_bytes is not None else img.path)
 
-                    # Preserve the original image anchor and its display extent.
                     try:
-                        new_anchor = deepcopy(anchor)
-                        new_anchor._from = deepcopy(anchor._from)
-                        new_anchor._from.row = anchor._from.row + rows_before
-                        if hasattr(new_anchor, "_to") and getattr(new_anchor, "_to") is not None:
-                            new_anchor._to = deepcopy(anchor._to)
-                            new_anchor._to.row = anchor._to.row + rows_before
-                        merged_image.anchor = new_anchor
+                        merged_anchor = TwoCellAnchor(editAs="twoCell")
+                        merged_anchor._from = AnchorMarker(col=src_col - 1, row=dst_row - 1, colOff=0, rowOff=0)
+                        merged_anchor.to = AnchorMarker(col=src_col, row=dst_row, colOff=0, rowOff=0)
+                        merged_image.anchor = merged_anchor
                     except Exception:
-                        pass
+                        try:
+                            merged_image.anchor = f"{get_column_letter(src_col)}{dst_row}"
+                        except Exception:
+                            pass
 
-                    if getattr(merged_image, "anchor", None) is None:
-                        ws.add_image(merged_image, f"{get_column_letter(src_col)}{dst_row}")
-                    else:
-                        ws.add_image(merged_image)
+                    ws.add_image(merged_image)
             except Exception:
                 continue
 
@@ -866,8 +872,8 @@ def main(argv: list[str] | None = None) -> int:
                         "(default: <pdf name>.xlsx)")
     parser.add_argument("--dpi", type=int, default=300,
                         help="render DPI for OCR on image-only PDFs (default: 300)")
-    parser.add_argument("--img-dpi", type=int, default=150,
-                        help="render DPI for cropped cell images (default: 150)")
+    parser.add_argument("--img-dpi", type=int, default=300,
+                        help="render DPI for cropped cell images (default: 300)")
     parser.add_argument("--broker", default="",
                         help="중개인/임대인명 value for every row (default: empty)")
     parser.add_argument("--date", dest="info_date",
