@@ -74,5 +74,164 @@ TEMPLATES = {
         },
         "OCR_LANG": "kor+eng",
     },
+    "S1": {
+        "name": "S1",
+        "label": "S1",
+        "keywords": [
+            "S-1 CORPORATION",
+            "GENERAL INFORMATION",
+            "SPACE AVAILABILITY & RENT",
+            "시흥 데콘 스마트물류센터",
+        ],
+        "GI_FIELDS": [
+            "소재지",
+            "대지면적",
+            "연면적",
+            "주용도",
+            "규모",
+            "인근IC",
+            "건폐율/용적률",
+            "구조",
+            "층고",
+            "준공년도",
+        ],
+        "GI_BOX": {"x0": 0.026, "x1": 0.287, "y0": 0.548, "y1": 0.955},
+        "GI_VALUE_X": 0.110,
+        "TITLE_BOX": {"x0": 0.025, "x1": 0.610, "y0": 0.018, "y1": 0.115},
+        "PHOTO_BOX": {"x0": 0.026, "x1": 0.334, "y0": 0.194, "y1": 0.508},
+        "SPACE_BOX": {"x0": 0.512, "x1": 0.982, "y0": 0.525, "y1": 0.950},
+        "SPACE_PAD": {"left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0},
+        "SPEC_BOX": {"x0": 0.296, "x1": 0.510, "y0": 0.548, "y1": 0.950},
+        "OCR_LANG": "kor+eng",
+    },
+    "Mateplus": {
+        "name": "Mateplus",
+        "label": "MatePlus",
+        "keywords": [
+            "MatePlus",
+            "로지스포인트 김포 물류센터",
+            "GENERAL INFORMATION",
+            "SPACE AVAILABILITY & RENT",
+            "PERSPECTIVE VIEW",
+        ],
+        "GI_FIELDS": [
+            "소재지",
+            "연면적",
+            "주용도",
+            "규모",
+            "인근IC",
+            "건폐율/용적률",
+            "준공년도",
+        ],
+        "GI_BOX": {"x0": 0.021, "x1": 0.250, "y0": 0.585, "y1": 0.910},
+        "GI_VALUE_X": 0.106,
+        "TITLE_BOX": {"x0": 0.010, "x1": 0.420, "y0": 0.015, "y1": 0.110},
+        "TITLE_REQUIRED_TOKENS": ["물류센터"],
+        "TITLE_EXTRACT_MODE": "mateplus_blocks",
+        "TITLE_SOURCE": "index",
+        "INDEX_PAGE_REQUIRED_TOKENS": [
+            "INDEX",
+            "물류센터명",
+            "소재지",
+        ],
+        "TITLE_OCR_PSM": 7,
+        "PHOTO_BOX": {"x0": 0.021, "x1": 0.325, "y0": 0.185, "y1": 0.515},
+        "SPACE_BOX": {"x0": 0.492, "x1": 0.955, "y0": 0.535, "y1": 0.910},
+        "SPACE_PAD": {"left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0},
+        "SPEC_BOX": {"x0": 0.335, "x1": 0.482, "y0": 0.850, "y1": 0.910},
+        "OCR_LANG": "kor+eng",
+    },
+    "ADF": {
+        "name": "ADF",
+        "label": "ADF Asset Management",
+
+        "keywords": [
+            "ADF ASSET MANAGEMENT",
+            "DC 밀양 물류센터",
+            "임대 정보",
+            "기타사항",
+            "경상남도 밀양시",
+        ],
+
+        # Only the structured PROFILE / 임대 정보 page is valid.
+        "PAGE_REQUIRED_TOKENS": [
+            "임대 정보",
+            "소재지",
+            "대지면적",
+            "연면적",
+            "기타사항",
+        ],
+        "PAGE_REQUIRED_MIN": 4,
+
+        # Visual row order of the right-side information table.
+        "GI_FIELDS": [
+            "소재지",
+            "대지면적",
+            "연면적",
+            "층수",
+            "기둥간격",
+            "야드",
+            "층고",
+            "준공년도",
+        ],
+
+        # Right-side general-information table.
+        "GI_BOX": {
+            "x0": 0.374,
+            "x1": 0.720,
+            "y0": 0.193,
+            "y1": 0.535,
+        },
+
+        # Divider between labels and values.
+        "GI_VALUE_X": 0.460,
+
+        # Blue title box containing "DC 밀양 물류센터".
+        "TITLE_BOX": {
+            "x0": 0.018,
+            "x1": 0.185,
+            "y0": 0.112,
+            "y1": 0.160,
+        },
+
+        "TITLE_REQUIRED_TOKENS": [
+            "물류센터",
+        ],
+
+        # Building photograph from the main profile page only.
+        "PHOTO_BOX": {
+            "x0": 0.019,
+            "x1": 0.360,
+            "y0": 0.193,
+            "y1": 0.907,
+        },
+
+        # ADF has no separate availability table.
+        # Use the complete right-side information block as 공실현황.
+        "SPACE_BOX": {
+            "x0": 0.374,
+            "x1": 0.720,
+            "y0": 0.193,
+            "y1": 0.907,
+        },
+
+        "SPACE_PAD": {
+            "left": 0.0,
+            "right": 0.0,
+            "top": 0.0,
+            "bottom": 0.0,
+        },
+
+        # 기타사항 values only.
+        "SPEC_BOX": {
+            "x0": 0.470,
+            "x1": 0.720,
+            "y0": 0.700,
+            "y1": 0.900,
+        },
+
+        "SPEC_FIELD": "기타",
+        "OCR_LANG": "kor+eng",
+    },
 }
 DEFAULT_TEMPLATE = "MOVE"

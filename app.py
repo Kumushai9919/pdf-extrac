@@ -107,11 +107,6 @@ st.title("📄 물류센터 PDF → Excel 추출기")
 st.caption("PDF를 끌어다 놓으면 매물 페이지를 표로 추출하고 사진·공실현황 이미지를 "
            "넣은 엑셀 파일을 만들어 드립니다.")
 
-if not ocr_available():
-    st.warning("Tesseract OCR가 설치되어 있지 않습니다. 텍스트 레이어가 있는 PDF는 "
-               "정상 동작하지만, 스캔(이미지) PDF는 추출되지 않습니다.  "
-               "설치: `brew install tesseract tesseract-lang`")
-
 with st.sidebar:
     st.header("옵션")
     template = st.selectbox("브로커 템플릿 선택", list(TEMPLATES.keys()),
@@ -154,12 +149,23 @@ with st.sidebar:
                     except Exception as exc:
                         st.error(f"엑셀 병합에 실패했습니다: {exc}")
 
+EXTRACTOR_VERSION = "mateplus-title-v4"
+
 uploaded = st.file_uploader("PDF 파일을 여기에 끌어다 놓으세요", type=["pdf"],
                             accept_multiple_files=False)
 
 if uploaded is not None:
-    file_sig = (uploaded.name, uploaded.size, template, broker, info_date,
-                img_width, img_dpi, ocr_dpi)
+    file_sig = (
+        EXTRACTOR_VERSION,
+        uploaded.name,
+        uploaded.size,
+        template,
+        broker,
+        info_date,
+        img_width,
+        img_dpi,
+        ocr_dpi,
+    )
     if st.session_state.get("sig") != file_sig:
         with st.spinner(f"'{uploaded.name}' 분석 중…"):
             result = run_extraction(uploaded.getvalue(), template, broker,

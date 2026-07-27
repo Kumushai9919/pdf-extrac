@@ -1,14 +1,22 @@
+.venv/
 venv/
+test_env/
 __pycache__/
 *.pyc
+.streamlit/secrets.toml
+*.pdf
+*.xlsx
+*_images/
+debug_images/
+tmp_*
+.env
 .DS_Store
+.vscode/
 
 # local data & generated output (keep the repo lean for Streamlit Cloud)
 local_file/
-*_images/
 dsvtest2_images/
 dsv_main_images/
-*.pdf
-*.xlsx
 ~$*
 debug/
+debug.txt

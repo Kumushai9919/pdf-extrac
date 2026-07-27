@@ -536,8 +536,6 @@ def extract_page(img: Image.Image, page_idx: int, img_dir: str,
     title_box = _px(template.get("TITLE_BOX", TITLE_BOX), w, h)
     title = clean_title(ocr(img.crop(title_box), psm=7,
                             lang=template.get("OCR_LANG", OCR_LANG), scale=2))
-    if template.get("name") == "Mateplus" and not title:
-        title = _title_from_address(address, template)
 
     # --- 시설특이사항 (facility spec / 비고 cell) ------------------------
     spec = ""
@@ -549,8 +547,6 @@ def extract_page(img: Image.Image, page_idx: int, img_dir: str,
                                        scale=2))
     except Exception:
         spec = ""
-
-    spec_field = template.get("SPEC_FIELD", "시설특이사항")
 
     # --- Images: building photo + Space-Availability table ----------------
     photo_path = os.path.join(img_dir, f"photo_p{page_idx + 1}.png")
@@ -581,7 +577,7 @@ def extract_page(img: Image.Image, page_idx: int, img_dir: str,
     except Exception:
         pass
 
-    output = {
+    return {
         "창고명": title,
         "주소": address,
         "행정구역_도": do,
@@ -589,13 +585,10 @@ def extract_page(img: Image.Image, page_idx: int, img_dir: str,
         "대지면적": clean_area(values.get("대지면적", "")),
         "연면적": clean_area(values.get("연면적", "")),
         "준공연도": year,
-        "시설특이사항": "",
-        "기타": "",
+        "시설특이사항": spec,
         "_photo": photo_path,
         "_space": space_path,
     }
-    output[spec_field] = spec
-    return output
 
 
 # ---------------------------------------------------------------------------
@@ -603,20 +596,6 @@ def extract_page(img: Image.Image, page_idx: int, img_dir: str,
 # ---------------------------------------------------------------------------
 def is_property_page(text: str, template: dict) -> bool:
     """Detect a property sheet page using the selected template's keywords."""
-    required_tokens = template.get("PAGE_REQUIRED_TOKENS", [])
-    if required_tokens:
-        text_compact = re.sub(r"\s+", "", text)
-        required_count = sum(
-            1
-            for token in required_tokens
-            if re.sub(r"\s+", "", token) in text_compact
-        )
-        required_min = int(
-            template.get("PAGE_REQUIRED_MIN", len(required_tokens))
-        )
-        if required_count < required_min:
-            return False
-
     text_norm = re.sub(r"\s+", "", text)
     keywords = template.get("keywords")
     if keywords:
@@ -823,231 +802,9 @@ def _title_from_top_region(page: "fitz.Page", template: dict) -> str:
     )
 
 
-def _title_from_address(address: str, template: dict) -> str:
-    """Lookup a MatePlus title from the cleaned address string."""
-    if not address:
-        return ""
-    mapping = template.get("TITLE_BY_ADDRESS", {})
-    if not isinstance(mapping, dict):
-        return ""
-    compact_address = re.sub(r"\s+", "", address)
-    for key, title in mapping.items():
-        if not key or not title:
-            continue
-        if re.sub(r"\s+", "", key) in compact_address:
-            return clean_title(title)
-    return ""
-
-
-def _normalize_index_address(value: str) -> str:
-    return re.sub(r"[^0-9A-Za-z가-힣]", "", value or "").lower()
-
-
-def _extract_mateplus_index(
-    doc: "fitz.Document",
-    template: dict,
-) -> tuple[dict[str, str], list[str]]:
-    """
-    Read MatePlus warehouse title/address pairs from the INDEX page.
-
-    Returns:
-        address_to_title
-        ordered_titles
-    """
-    required = template.get("INDEX_PAGE_REQUIRED_TOKENS", [])
-    index_page = None
-
-    for page in doc:
-        page_text = page.get_text("text", sort=True)
-        compact = re.sub(r"\s+", "", page_text)
-
-        if all(
-            re.sub(r"\s+", "", token) in compact
-            for token in required
-        ):
-            index_page = page
-            break
-
-    if index_page is None:
-        return {}, []
-
-    words = index_page.get_text("words", sort=True)
-
-    title_header = next(
-        (
-            word
-            for word in words
-            if re.sub(r"\s+", "", str(word[4])) == "물류센터명"
-        ),
-        None,
-    )
-
-    address_header = next(
-        (
-            word
-            for word in words
-            if re.sub(r"\s+", "", str(word[4])) == "소재지"
-        ),
-        None,
-    )
-
-    next_header = next(
-        (
-            word
-            for word in words
-            if re.sub(r"\s+", "", str(word[4])) == "입주시기"
-        ),
-        None,
-    )
-
-    if title_header is None or address_header is None:
-        return {}, []
-
-    title_x0 = title_header[0] - 10
-    title_x1 = address_header[0] - 5
-
-    address_x0 = address_header[0] - 10
-    address_x1 = (
-        next_header[0] - 5
-        if next_header is not None
-        else index_page.rect.width * 0.56
-    )
-
-    header_bottom = max(title_header[3], address_header[3])
-
-    rows: list[dict] = []
-    tolerance = max(3.0, index_page.rect.height * 0.004)
-
-    selected = []
-
-    for word in words:
-        x0, y0, x1, y1, value = word[:5]
-        cy = (y0 + y1) / 2
-
-        if cy <= header_bottom:
-            continue
-
-        selected.append((cy, x0, x1, str(value).strip()))
-
-    selected.sort(key=lambda item: (item[0], item[1]))
-
-    for cy, x0, x1, value in selected:
-        if not value:
-            continue
-
-        if rows and abs(cy - rows[-1]["cy"]) <= tolerance:
-            rows[-1]["items"].append((x0, x1, value))
-            rows[-1]["ys"].append(cy)
-            rows[-1]["cy"] = sum(rows[-1]["ys"]) / len(rows[-1]["ys"])
-        else:
-            rows.append({
-                "cy": cy,
-                "ys": [cy],
-                "items": [(x0, x1, value)],
-            })
-
-    address_to_title: dict[str, str] = {}
-    ordered_titles: list[str] = []
-
-    for row in rows:
-        title_parts = []
-        address_parts = []
-
-        for x0, x1, value in sorted(
-            row["items"],
-            key=lambda item: item[0],
-        ):
-            center_x = (x0 + x1) / 2
-
-            if title_x0 <= center_x < title_x1:
-                title_parts.append(value)
-            elif address_x0 <= center_x < address_x1:
-                address_parts.append(value)
-
-        title = clean_title(" ".join(title_parts))
-        address = " ".join(address_parts).strip()
-
-        if not title or not address:
-            continue
-
-        if title in {"물류센터명", "INDEX"}:
-            continue
-
-        address_key = _normalize_index_address(address)
-
-        if address_key:
-            address_to_title[address_key] = title
-
-        if title not in ordered_titles:
-            ordered_titles.append(title)
-
-    return address_to_title, ordered_titles
-
-
-def _extract_mateplus_title_from_blocks(
-    page: "fitz.Page",
-    template: dict,
-) -> str:
-    """
-    Extract MatePlus title from PDF text blocks in the upper-left page area.
-    Do not use Tesseract.
-    """
-    candidates: list[str] = []
-
-    for block in page.get_text("blocks", sort=True):
-        x0, y0, x1, y1, block_text = block[:5]
-
-        cx = (x0 + x1) / 2
-        cy = (y0 + y1) / 2
-
-        # MatePlus title is in the upper-left part of the page.
-        if cx > page.rect.width * 0.50:
-            continue
-        if cy > page.rect.height * 0.15:
-            continue
-
-        for line in str(block_text).splitlines():
-            line = clean_title(line)
-
-            if not line:
-                continue
-
-            compact = re.sub(r"\s+", "", line)
-
-            if "물류센터" not in compact:
-                continue
-
-            if any(bad in line for bad in (
-                "%",
-                "㎡",
-                "평",
-                "GENERAL INFORMATION",
-                "SPACE AVAILABILITY",
-                "PERSPECTIVE VIEW",
-            )):
-                continue
-
-            candidates.append(line)
-
-    if not candidates:
-        return ""
-
-    candidates.sort(
-        key=lambda value: len(re.sub(r"\s+", "", value)),
-        reverse=True,
-    )
-
-    return candidates[0]
-
-
 def _select_title_from_box(page: "fitz.Page", template: dict,
                            page_text: str) -> str:
     """Read the title from TITLE_BOX without OCR or GENERAL INFORMATION."""
-    if template.get("TITLE_EXTRACT_MODE") == "mateplus_blocks":
-        title = _extract_mateplus_title_from_blocks(page, template)
-        if title:
-            return title
-
     try:
         box = template.get("TITLE_BOX", TITLE_BOX)
         title = _best_title_candidate(
@@ -1074,34 +831,6 @@ def extract_text_page(page: "fitz.Page", page_idx: int,
 
     # Attempt a focused extraction of the title from the template TITLE_BOX
     title = _select_title_from_box(page, template, text)
-
-    # MatePlus fallback: scan the selectable top text lines for a visible 물류센터 title.
-    if template.get("name") == "Mateplus" and not title:
-        top_lines = [
-            clean_title(line)
-            for line in page.get_text("text", sort=True).splitlines()[:20]
-            if line.strip()
-        ]
-
-        for candidate in top_lines:
-            compact = re.sub(r"\s+", "", candidate)
-
-            if "물류센터" not in compact:
-                continue
-
-            if any(bad in candidate for bad in (
-                "%",
-                "㎡",
-                "평",
-                "GENERAL INFORMATION",
-                "SPACE AVAILABILITY",
-                "PERSPECTIVE VIEW",
-                "LOCATION",
-            )):
-                continue
-
-            title = candidate
-            break
 
     # TITLE_BOX selection already includes a safe top-of-page fallback.
     # Never scan GENERAL INFORMATION or arbitrary page lines for a title.
@@ -1142,10 +871,6 @@ def extract_text_page(page: "fitz.Page", page_idx: int,
                         values.setdefault(fld, val_cand)
         i += 1
 
-    address = clean_address(values.get("소재지", ""))
-    if template.get("name") == "Mateplus" and not title:
-        title = _title_from_address(address, template)
-
     spec = ""
     if template.get("SPEC_BOX"):
         spec = _extract_spec_from_box(page, template)
@@ -1181,8 +906,6 @@ def extract_text_page(page: "fitz.Page", page_idx: int,
             pass
 
     address = clean_address(values.get("소재지", ""))
-    if template.get("name") == "Mateplus" and not title:
-        title = _title_from_address(address, template)
     do, si = parse_region(address)
     year = clean_year(values.get("준공년도", "")) or "미정"
 
@@ -1287,8 +1010,8 @@ def write_excel(records: list[dict], out_path: str, broker: str,
             "건축면적": "",
             "준공연도": rec["준공연도"],
             "공실현황": "",
-            "시설특이사항": rec.get("시설특이사항", ""),
-            "기타": rec.get("기타", ""),
+            "시설특이사항": rec["시설특이사항"],
+            "기타": "",
             "정보확인일자": info_date,
             "사진": "",
         }
@@ -1434,19 +1157,6 @@ def extract_records(doc: "fitz.Document", img_dir: str, dpi: int = 300,
     os.makedirs(img_dir, exist_ok=True)
     template = get_template(template_name)
 
-    mateplus_address_titles: dict[str, str] = {}
-    mateplus_ordered_titles: list[str] = []
-    mateplus_title_index = 0
-
-    if (
-        template.get("name") == "Mateplus"
-        and template.get("TITLE_SOURCE") == "index"
-    ):
-        (
-            mateplus_address_titles,
-            mateplus_ordered_titles,
-        ) = _extract_mateplus_index(doc, template)
-
     records: list[dict] = []
     skipped = 0
     total = len(doc)
@@ -1459,34 +1169,6 @@ def extract_records(doc: "fitz.Document", img_dir: str, dpi: int = 300,
             rec = extract_page(render_page(page, dpi), i, img_dir, template, crop_dpi=img_dpi)
         else:
             skipped += 1
-        if rec is not None and template.get("name") == "Mateplus":
-            address_key = _normalize_index_address(rec.get("주소", ""))
-            index_title = mateplus_address_titles.get(address_key, "")
-
-            if not index_title:
-                for saved_address, saved_title in mateplus_address_titles.items():
-                    if (
-                        saved_address
-                        and address_key
-                        and (
-                            saved_address in address_key
-                            or address_key in saved_address
-                        )
-                    ):
-                        index_title = saved_title
-                        break
-
-            if (
-                not index_title
-                and mateplus_title_index < len(mateplus_ordered_titles)
-            ):
-                index_title = mateplus_ordered_titles[mateplus_title_index]
-
-            if index_title:
-                rec["창고명"] = index_title
-
-            mateplus_title_index += 1
-
         if rec is not None:
             records.append(rec)
         if progress is not None:
