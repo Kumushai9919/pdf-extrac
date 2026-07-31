@@ -24,6 +24,8 @@ from templates import TEMPLATES, DEFAULT_TEMPLATE
 
 st.set_page_config(page_title="물류센터 PDF → Excel 추출기",
                    page_icon="📄", layout="wide")
+APP_BUILD = "mateplus-strict-filter-v3"
+st.sidebar.caption(f"Build: {APP_BUILD}")
 
 TEXT_COLUMNS = [c for c in COLUMNS if c not in IMG_COLS]
 GALLERY_LIMIT = 24

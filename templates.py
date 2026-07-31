@@ -168,6 +168,14 @@ TEMPLATES = {
         "y1": 0.910,
     },
     "OCR_LANG": "kor+eng",
+    "PAGE_REQUIRED_TOKENS": [
+    "PERSPECTIVE VIEW",
+    "GENERAL INFORMATION",
+    "SPACE AVAILABILITY & RENT",
+    "소재지",
+    "연면적",
+],
+"PAGE_REQUIRED_MIN": 4,
 },
    
     "ADF": {
