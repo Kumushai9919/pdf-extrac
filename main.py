@@ -2205,9 +2205,22 @@ def extract_records(doc: "fitz.Document", img_dir: str, dpi: int = 300,
         rec = None
         if is_property_page(text, template):
             rec = extract_text_page(page, i, img_dir, img_dpi, template)
-        elif len(text.strip()) < 50 and ocr_ready:
-            rec = extract_page(render_page(page, dpi), i, img_dir, template, crop_dpi=img_dpi)
+        elif (
+            template.get("name") != "Mateplus"
+            and len(text.strip()) < 50
+            and ocr_ready
+        ):
+            rec = extract_page(
+                render_page(page, dpi),
+                i,
+                img_dir,
+                template,
+                crop_dpi=img_dpi,
+            )
         else:
+            # MatePlus property pages already contain selectable text.
+            # Never OCR its cover/SITE PLAN pages, because Streamlit Cloud has
+            # Tesseract installed and can otherwise create false records.
             skipped += 1
         if (
             rec is not None
