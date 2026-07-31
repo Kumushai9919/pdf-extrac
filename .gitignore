@@ -20,3 +20,7 @@ dsv_main_images/
 ~$*
 debug/
 debug.txt
+.venv/
+.venv_macos_backup/
+__pycache__/
+*.pyc

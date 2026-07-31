@@ -104,43 +104,72 @@ TEMPLATES = {
         "SPEC_BOX": {"x0": 0.296, "x1": 0.510, "y0": 0.548, "y1": 0.950},
         "OCR_LANG": "kor+eng",
     },
+
     "Mateplus": {
-        "name": "Mateplus",
-        "label": "MatePlus",
-        "keywords": [
-            "MatePlus",
-            "로지스포인트 김포 물류센터",
-            "GENERAL INFORMATION",
-            "SPACE AVAILABILITY & RENT",
-            "PERSPECTIVE VIEW",
-        ],
-        "GI_FIELDS": [
-            "소재지",
-            "연면적",
-            "주용도",
-            "규모",
-            "인근IC",
-            "건폐율/용적률",
-            "준공년도",
-        ],
-        "GI_BOX": {"x0": 0.021, "x1": 0.250, "y0": 0.585, "y1": 0.910},
-        "GI_VALUE_X": 0.106,
-        "TITLE_BOX": {"x0": 0.010, "x1": 0.420, "y0": 0.015, "y1": 0.110},
-        "TITLE_REQUIRED_TOKENS": ["물류센터"],
-        "TITLE_EXTRACT_MODE": "mateplus_blocks",
-        "TITLE_SOURCE": "index",
-        "INDEX_PAGE_REQUIRED_TOKENS": [
-            "INDEX",
-            "물류센터명",
-            "소재지",
-        ],
-        "TITLE_OCR_PSM": 7,
-        "PHOTO_BOX": {"x0": 0.021, "x1": 0.325, "y0": 0.185, "y1": 0.515},
-        "SPACE_BOX": {"x0": 0.492, "x1": 0.955, "y0": 0.535, "y1": 0.910},
-        "SPACE_PAD": {"left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0},
-        "SPEC_BOX": {"x0": 0.335, "x1": 0.482, "y0": 0.850, "y1": 0.910},
-        "OCR_LANG": "kor+eng",
+    "name": "Mateplus",
+    "label": "MatePlus",
+    "keywords": [
+        "MatePlus",
+        "GENERAL INFORMATION",
+        "SPACE AVAILABILITY & RENT",
+        "PERSPECTIVE VIEW",
+    ],
+    "GI_FIELDS": [
+        "소재지",
+        "연면적",
+        "주용도",
+        "규모",
+        "인근IC",
+        "건폐율/용적률",
+        "준공년도",
+    ],
+    "GI_BOX": {
+        "x0": 0.021,
+        "x1": 0.250,
+        "y0": 0.585,
+        "y1": 0.910,
     },
+    "GI_VALUE_X": 0.106,
+
+    # MatePlus titles are obtained from the INDEX table
+    # by matching each property's address.
+    "TITLE_SOURCE": "index",
+
+    # Do not include "INDEX" because it is graphical,
+    # not selectable PDF text.
+    "INDEX_PAGE_REQUIRED_TOKENS": [
+        "물류센터명",
+        "소재지",
+        "입주시기",
+    ],
+
+    "PHOTO_BOX": {
+        "x0": 0.021,
+        "x1": 0.325,
+        "y0": 0.185,
+        "y1": 0.515,
+    },
+    "SPACE_BOX": {
+        "x0": 0.492,
+        "x1": 0.955,
+        "y0": 0.535,
+        "y1": 0.910,
+    },
+    "SPACE_PAD": {
+        "left": 0.0,
+        "right": 0.0,
+        "top": 0.0,
+        "bottom": 0.0,
+    },
+    "SPEC_BOX": {
+        "x0": 0.335,
+        "x1": 0.482,
+        "y0": 0.850,
+        "y1": 0.910,
+    },
+    "OCR_LANG": "kor+eng",
+},
+   
     "ADF": {
         "name": "ADF",
         "label": "ADF Asset Management",

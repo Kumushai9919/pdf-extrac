@@ -33,11 +33,16 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import posixpath
 import re
 import shutil
 import sys
+import zipfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from copy import deepcopy
 from datetime import date
+from difflib import SequenceMatcher
 from io import BytesIO
 
 import fitz  # PyMuPDF
@@ -54,7 +59,7 @@ except ImportError as exc:
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from PIL import Image
+from PIL import Image, ImageOps
 from templates import TEMPLATES, DEFAULT_TEMPLATE
 
 # ---------------------------------------------------------------------------
@@ -843,35 +848,183 @@ def _normalize_index_address(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z가-힣]", "", value or "").lower()
 
 
+def _unique_title(titles: set[str] | None) -> str:
+    """Return the only title in a set; ambiguous or empty sets return blank."""
+    if not titles or len(titles) != 1:
+        return ""
+    return next(iter(titles))
+
+
+def _address_number_tokens(value: str) -> list[str]:
+    """Keep Korean lot/building numbers such as 1549-1 as one token."""
+    return re.findall(r"\d+(?:-\d+)?", value or "")
+
+
+def _normalize_index_address(value: str) -> str:
+    """
+    Normalize harmless address spelling differences before matching.
+
+    Examples:
+        인천광역시 / 인천시 -> 인천
+        경기도 / 경기 -> 경기
+        whitespace and punctuation are ignored
+    """
+    normalized = value or ""
+
+    administrative_aliases = (
+        ("서울특별시", "서울"),
+        ("부산광역시", "부산"),
+        ("대구광역시", "대구"),
+        ("인천광역시", "인천"),
+        ("광주광역시", "광주"),
+        ("대전광역시", "대전"),
+        ("울산광역시", "울산"),
+        ("세종특별자치시", "세종"),
+        ("경기도", "경기"),
+        ("강원특별자치도", "강원"),
+        ("강원도", "강원"),
+        ("충청북도", "충북"),
+        ("충청남도", "충남"),
+        ("전북특별자치도", "전북"),
+        ("전라북도", "전북"),
+        ("전라남도", "전남"),
+        ("경상북도", "경북"),
+        ("경상남도", "경남"),
+        ("제주특별자치도", "제주"),
+    )
+
+    for long_name, short_name in administrative_aliases:
+        normalized = normalized.replace(long_name, short_name)
+
+    # Some PDFs duplicate one character during text extraction:
+    # "인천광역시 시서구" -> "인천 시서구". Remove repeated admin suffixes
+    # only when they occur as a standalone duplicate.
+    normalized = re.sub(r"\b(시|도)\s+(?=[가-힣]+(?:시|군|구))", "", normalized)
+
+    return re.sub(
+        r"[^0-9A-Za-z가-힣]",
+        "",
+        normalized,
+    ).lower()
+
+
+def _match_mateplus_index_title(
+    address: str,
+    address_to_titles: dict[str, set[str]],
+) -> str:
+    """
+    Return a MatePlus title only for a unique, confident address match.
+
+    Safety rules:
+        * exact unique match -> accept
+        * unique containment match -> accept
+        * unique fuzzy match with the same final lot/building number -> accept
+        * ambiguous or weak match -> blank
+        * never use page order
+    """
+    address_key = _normalize_index_address(address)
+    if not address_key:
+        return ""
+
+    exact_title = _unique_title(address_to_titles.get(address_key))
+    if exact_title:
+        return exact_title
+
+    containment_titles: set[str] = set()
+
+    for saved_address, titles in address_to_titles.items():
+        if not saved_address:
+            continue
+        if saved_address in address_key or address_key in saved_address:
+            containment_titles.update(titles)
+
+    containment_title = _unique_title(containment_titles)
+    if containment_title:
+        return containment_title
+    if len(containment_titles) > 1:
+        return ""
+
+    # Compare numeric tokens after normalization so "394-20" and "39420"
+    # are treated consistently on both sides.
+    property_numbers = re.findall(r"\d+", address_key)
+    final_property_number = (
+        property_numbers[-1]
+        if property_numbers
+        else ""
+    )
+
+    if not final_property_number:
+        return ""
+
+    fuzzy_titles: set[str] = set()
+
+    for saved_address, titles in address_to_titles.items():
+        saved_numbers = re.findall(r"\d+", saved_address)
+        final_saved_number = (
+            saved_numbers[-1]
+            if saved_numbers
+            else ""
+        )
+
+        if final_saved_number != final_property_number:
+            continue
+
+        score = SequenceMatcher(
+            None,
+            address_key,
+            saved_address,
+        ).ratio()
+
+        if score >= 0.82:
+            fuzzy_titles.update(titles)
+
+    return _unique_title(fuzzy_titles)
+
+
 def _extract_mateplus_index(
     doc: "fitz.Document",
     template: dict,
-) -> tuple[dict[str, str], list[str]]:
+) -> dict[str, set[str]]:
     """
-    Read MatePlus warehouse title/address pairs from the INDEX page.
+    Read warehouse-title/address pairs from the MatePlus INDEX table.
 
-    Returns:
-        address_to_title
-        ordered_titles
+    The visible word "INDEX" is vector artwork in this PDF and therefore isn't
+    part of the selectable text layer. The page is identified using the real
+    table headers instead.
     """
-    required = template.get("INDEX_PAGE_REQUIRED_TOKENS", [])
     index_page = None
+    words: list[tuple] = []
+
+    required_headers = {
+        re.sub(r"\s+", "", token)
+        for token in template.get(
+            "INDEX_PAGE_REQUIRED_TOKENS",
+            ["물류센터명", "소재지", "입주시기"],
+        )
+        if token and token != "INDEX"
+    }
+
+    if not required_headers:
+        required_headers = {
+            "물류센터명",
+            "소재지",
+            "입주시기",
+        }
 
     for page in doc:
-        page_text = page.get_text("text", sort=True)
-        compact = re.sub(r"\s+", "", page_text)
+        candidate_words = page.get_text("words", sort=True)
+        normalized_words = {
+            re.sub(r"\s+", "", str(word[4]))
+            for word in candidate_words
+        }
 
-        if all(
-            re.sub(r"\s+", "", token) in compact
-            for token in required
-        ):
+        if required_headers.issubset(normalized_words):
             index_page = page
+            words = candidate_words
             break
 
     if index_page is None:
-        return {}, []
-
-    words = index_page.get_text("words", sort=True)
+        return {}
 
     title_header = next(
         (
@@ -881,7 +1034,6 @@ def _extract_mateplus_index(
         ),
         None,
     )
-
     address_header = next(
         (
             word
@@ -890,7 +1042,6 @@ def _extract_mateplus_index(
         ),
         None,
     )
-
     next_header = next(
         (
             word
@@ -901,57 +1052,66 @@ def _extract_mateplus_index(
     )
 
     if title_header is None or address_header is None:
-        return {}, []
+        return {}
 
     title_x0 = title_header[0] - 10
     title_x1 = address_header[0] - 5
-
     address_x0 = address_header[0] - 10
     address_x1 = (
         next_header[0] - 5
         if next_header is not None
         else index_page.rect.width * 0.56
     )
-
     header_bottom = max(title_header[3], address_header[3])
 
-    rows: list[dict] = []
-    tolerance = max(3.0, index_page.rect.height * 0.004)
-
-    selected = []
+    tolerance = max(
+        3.0,
+        index_page.rect.height * 0.004,
+    )
+    selected: list[tuple[float, float, float, str]] = []
 
     for word in words:
         x0, y0, x1, y1, value = word[:5]
-        cy = (y0 + y1) / 2
+        center_y = (y0 + y1) / 2
 
-        if cy <= header_bottom:
+        if center_y <= header_bottom:
             continue
 
-        selected.append((cy, x0, x1, str(value).strip()))
+        selected.append(
+            (
+                center_y,
+                x0,
+                x1,
+                str(value).strip(),
+            )
+        )
 
     selected.sort(key=lambda item: (item[0], item[1]))
+    rows: list[dict] = []
 
-    for cy, x0, x1, value in selected:
+    for center_y, x0, x1, value in selected:
         if not value:
             continue
 
-        if rows and abs(cy - rows[-1]["cy"]) <= tolerance:
+        if rows and abs(center_y - rows[-1]["center_y"]) <= tolerance:
             rows[-1]["items"].append((x0, x1, value))
-            rows[-1]["ys"].append(cy)
-            rows[-1]["cy"] = sum(rows[-1]["ys"]) / len(rows[-1]["ys"])
+            rows[-1]["ys"].append(center_y)
+            rows[-1]["center_y"] = (
+                sum(rows[-1]["ys"])
+                / len(rows[-1]["ys"])
+            )
         else:
             rows.append({
-                "cy": cy,
-                "ys": [cy],
+                "center_y": center_y,
+                "ys": [center_y],
                 "items": [(x0, x1, value)],
             })
 
-    address_to_title: dict[str, str] = {}
-    ordered_titles: list[str] = []
+    address_to_titles: dict[str, set[str]] = {}
 
     for row in rows:
-        title_parts = []
-        address_parts = []
+        title_parts: list[str] = []
+        address_parts: list[str] = []
 
         for x0, x1, value in sorted(
             row["items"],
@@ -969,19 +1129,20 @@ def _extract_mateplus_index(
 
         if not title or not address:
             continue
-
         if title in {"물류센터명", "INDEX"}:
             continue
 
         address_key = _normalize_index_address(address)
+        if not address_key:
+            continue
 
-        if address_key:
-            address_to_title[address_key] = title
+        address_to_titles.setdefault(
+            address_key,
+            set(),
+        ).add(title)
 
-        if title not in ordered_titles:
-            ordered_titles.append(title)
+    return address_to_titles
 
-    return address_to_title, ordered_titles
 
 
 def _extract_mateplus_title_from_blocks(
@@ -1040,9 +1201,74 @@ def _extract_mateplus_title_from_blocks(
     return candidates[0]
 
 
+
+def _extract_title_with_ocr(
+    page: "fitz.Page",
+    template: dict,
+) -> str:
+    """
+    OCR only the configured title box.
+
+    This is a fallback for PDFs where the visible warehouse title is drawn as
+    outlines/image content and therefore isn't present in the selectable text
+    layer. It is intentionally limited to TITLE_BOX so it cannot accidentally
+    pick values from GENERAL INFORMATION.
+    """
+    try:
+        box = template.get("TITLE_BOX", TITLE_BOX)
+        clip = _rect_from_frac(box, page)
+        dpi = int(template.get("TITLE_OCR_DPI", 300))
+        pix = page.get_pixmap(
+            dpi=dpi,
+            clip=clip,
+            alpha=False,
+        )
+        image = Image.frombytes(
+            "RGB",
+            (pix.width, pix.height),
+            pix.samples,
+        )
+    except Exception:
+        return ""
+
+    # The MatePlus title is dark text on white. Autocontrast improves OCR
+    # without changing the source PDF or the exported Excel images.
+    grayscale = ImageOps.autocontrast(image.convert("L"))
+    candidates: list[str] = []
+    psm_values = [
+        int(template.get("TITLE_OCR_PSM", 7)),
+        6,
+        11,
+    ]
+
+    for psm in dict.fromkeys(psm_values):
+        try:
+            raw = ocr(
+                grayscale,
+                psm=psm,
+                lang=template.get("OCR_LANG", OCR_LANG),
+                scale=2,
+            )
+        except Exception:
+            continue
+
+        lines = [
+            clean_title(line)
+            for line in raw.splitlines()
+            if line.strip()
+        ]
+        candidates.extend(lines)
+
+        combined = clean_title(" ".join(lines))
+        if combined:
+            candidates.append(combined)
+
+    return _best_title_candidate(candidates, template)
+
+
 def _select_title_from_box(page: "fitz.Page", template: dict,
                            page_text: str) -> str:
-    """Read the title from TITLE_BOX without OCR or GENERAL INFORMATION."""
+    """Read the warehouse title from the configured top title region."""
     if template.get("TITLE_EXTRACT_MODE") == "mateplus_blocks":
         title = _extract_mateplus_title_from_blocks(page, template)
         if title:
@@ -1059,6 +1285,13 @@ def _select_title_from_box(page: "fitz.Page", template: dict,
     except Exception:
         pass
 
+    # MatePlus sometimes renders the visible title as vector outlines rather
+    # than selectable PDF text. OCR only the title box in that case.
+    if template.get("name") == "Mateplus":
+        title = _extract_title_with_ocr(page, template)
+        if title:
+            return title
+
     return _title_from_top_region(page, template)
 
 
@@ -1072,8 +1305,16 @@ def extract_text_page(page: "fitz.Page", page_idx: int,
     text = page.get_text()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # Attempt a focused extraction of the title from the template TITLE_BOX
-    title = _select_title_from_box(page, template, text)
+    # MatePlus property-page titles are vector artwork, not selectable text.
+    # For TITLE_SOURCE="index", skip OCR and assign 창고명 later by matching
+    # this page's extracted address to the selectable INDEX table.
+    if (
+        template.get("name") == "Mateplus"
+        and template.get("TITLE_SOURCE") == "index"
+    ):
+        title = ""
+    else:
+        title = _select_title_from_box(page, template, text)
 
     # MatePlus fallback: scan the selectable top text lines for a visible 물류센터 title.
     if template.get("name") == "Mateplus" and not title:
@@ -1233,6 +1474,140 @@ def extract_text_page(page: "fitz.Page", page_idx: int,
 
 
 # ---------------------------------------------------------------------------
+# Excel image optimization
+# ---------------------------------------------------------------------------
+# The building photo is only a visual reference, so it can be compressed
+# aggressively. The availability table contains text, so it keeps more detail.
+PHOTO_EXCEL_MAX_WIDTH = 700
+PHOTO_EXCEL_JPEG_QUALITY = 65
+SPACE_EXCEL_MAX_WIDTH = 1000
+SPACE_EXCEL_COLORS = 128
+
+
+def _flatten_to_rgb(image: Image.Image) -> Image.Image:
+    """Convert an image to RGB while replacing transparency with white."""
+    if image.mode in ("RGBA", "LA") or (
+        image.mode == "P" and "transparency" in image.info
+    ):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, "white")
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+
+    return image.convert("RGB")
+
+
+def _resize_to_max_width(image: Image.Image, max_width: int) -> Image.Image:
+    """Downsample without enlarging an already small image."""
+    if image.width <= max_width:
+        return image.copy()
+
+    new_height = max(
+        1,
+        round(image.height * max_width / image.width),
+    )
+    return image.resize(
+        (max_width, new_height),
+        Image.Resampling.LANCZOS,
+    )
+
+
+def _optimize_image_bytes(
+    image_bytes: bytes,
+    image_kind: str,
+    original_filename: str = "image.png",
+) -> tuple[bytes, str]:
+    """
+    Reduce XLSX image payload size without changing extraction/OCR.
+
+    사진:
+        JPEG, max 700 px wide, quality 65.
+    공실현황:
+        indexed PNG, max 1000 px wide, 128 colors for readable text.
+    """
+    with Image.open(BytesIO(image_bytes)) as source:
+        source.load()
+
+        if image_kind == "사진":
+            # Avoid repeatedly recompressing an image that is already in the
+            # optimized format and dimensions.
+            if (
+                source.format == "JPEG"
+                and source.width <= PHOTO_EXCEL_MAX_WIDTH
+            ):
+                return image_bytes, Path(original_filename).with_suffix(
+                    ".jpg"
+                ).name
+
+            image = _resize_to_max_width(
+                _flatten_to_rgb(source),
+                PHOTO_EXCEL_MAX_WIDTH,
+            )
+            output = BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=PHOTO_EXCEL_JPEG_QUALITY,
+                optimize=True,
+                progressive=True,
+                subsampling=2,
+            )
+            return (
+                output.getvalue(),
+                Path(original_filename).with_suffix(".jpg").name,
+            )
+
+        # 공실현황 is mainly a table/text image. Palette PNG keeps lines and
+        # text sharper than low-quality JPEG while still reducing file size.
+        if (
+            source.format == "PNG"
+            and source.mode == "P"
+            and source.width <= SPACE_EXCEL_MAX_WIDTH
+        ):
+            return image_bytes, Path(original_filename).with_suffix(
+                ".png"
+            ).name
+
+        image = _resize_to_max_width(
+            _flatten_to_rgb(source),
+            SPACE_EXCEL_MAX_WIDTH,
+        )
+        image = image.quantize(
+            colors=SPACE_EXCEL_COLORS,
+            method=Image.Quantize.MEDIANCUT,
+            dither=Image.Dither.NONE,
+        )
+        output = BytesIO()
+        image.save(
+            output,
+            format="PNG",
+            optimize=True,
+            compress_level=9,
+        )
+        return (
+            output.getvalue(),
+            Path(original_filename).with_suffix(".png").name,
+        )
+
+
+def _prepare_excel_image_file(path: str, image_kind: str) -> str:
+    """Create an optimized sibling image and return its path."""
+    source_path = Path(path)
+    optimized_bytes, optimized_filename = _optimize_image_bytes(
+        source_path.read_bytes(),
+        image_kind,
+        source_path.name,
+    )
+
+    suffix = Path(optimized_filename).suffix
+    optimized_path = source_path.with_name(
+        f"{source_path.stem}_excel{suffix}"
+    )
+    optimized_path.write_bytes(optimized_bytes)
+    return str(optimized_path)
+
+
+# ---------------------------------------------------------------------------
 # Excel writing
 # ---------------------------------------------------------------------------
 def write_excel(records: list[dict], out_path: str, broker: str,
@@ -1301,7 +1676,9 @@ def write_excel(records: list[dict], out_path: str, broker: str,
             if not path:
                 continue
 
-            with Image.open(path) as im:
+            optimized_path = _prepare_excel_image_file(path, name)
+
+            with Image.open(optimized_path) as im:
                 ow, oh = im.size
             if ow == 0:
                 continue
@@ -1310,8 +1687,16 @@ def write_excel(records: list[dict], out_path: str, broker: str,
             scaled_height = int(oh * scale)
             max_row_px = max(max_row_px, scaled_height + 10)
 
-            ws.embed_image(row_idx, col_index[name] - 1, path,
-                           {"description": name, "x_scale": scale, "y_scale": scale})
+            ws.embed_image(
+                row_idx,
+                col_index[name] - 1,
+                optimized_path,
+                {
+                    "description": name,
+                    "x_scale": scale,
+                    "y_scale": scale,
+                },
+            )
 
         ws.set_row_pixels(row_idx, max_row_px)
 
@@ -1319,96 +1704,463 @@ def write_excel(records: list[dict], out_path: str, broker: str,
     workbook.close()
 
 
+# OOXML namespaces used by XlsxWriter's native "Place in Cell" images.
+_XML_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XML_DOC_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_XML_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XML_RICH = "http://schemas.microsoft.com/office/spreadsheetml/2017/richdata"
+_XML_RICH_REL = "http://schemas.microsoft.com/office/spreadsheetml/2022/richvaluerel"
+
+
+def _zip_part_name(zf: zipfile.ZipFile, name: str) -> str | None:
+    """Return the actual ZIP member name, tolerating an optional leading slash."""
+    names = set(zf.namelist())
+    if name in names:
+        return name
+
+    alternate = "/" + name.lstrip("/")
+    if alternate in names:
+        return alternate
+
+    return None
+
+
+def _read_zip_xml(zf: zipfile.ZipFile, name: str) -> ET.Element:
+    actual_name = _zip_part_name(zf, name)
+    if actual_name is None:
+        raise KeyError(name)
+    return ET.fromstring(zf.read(actual_name))
+
+
+def _resolve_ooxml_target(base_part: str, target: str) -> str:
+    """Resolve an OOXML relationship target to a normalized ZIP part path."""
+    if target.startswith("/"):
+        return target.lstrip("/")
+
+    return posixpath.normpath(
+        posixpath.join(posixpath.dirname(base_part), target)
+    )
+
+
+def _first_worksheet_part(zf: zipfile.ZipFile) -> str:
+    """Resolve the first worksheet XML part from workbook relationships."""
+    workbook_root = _read_zip_xml(zf, "xl/workbook.xml")
+    sheet = workbook_root.find(f".//{{{_XML_MAIN}}}sheet")
+
+    if sheet is None:
+        raise ValueError("The workbook has no worksheet.")
+
+    relationship_id = sheet.attrib.get(f"{{{_XML_DOC_REL}}}id")
+    relationships_root = _read_zip_xml(
+        zf,
+        "xl/_rels/workbook.xml.rels",
+    )
+
+    for relationship in relationships_root.findall(
+        f"{{{_XML_PKG_REL}}}Relationship"
+    ):
+        if relationship.attrib.get("Id") == relationship_id:
+            return _resolve_ooxml_target(
+                "xl/workbook.xml",
+                relationship.attrib["Target"],
+            )
+
+    raise ValueError("Could not resolve the first worksheet XML part.")
+
+
+def extract_in_cell_images(
+    workbook_data: bytes,
+) -> dict[str, tuple[bytes, str, str]]:
+    """
+    Extract XlsxWriter/Excel native "Place in Cell" images from an XLSX.
+
+    Returns:
+        {
+            "K2": (image_bytes, "image1.png", "공실현황"),
+            "O2": (image_bytes, "image2.png", "사진"),
+        }
+
+    These images aren't exposed through openpyxl's ``worksheet._images``
+    because they are stored as Excel rich-data values, not drawing objects.
+    """
+    images: dict[str, tuple[bytes, str, str]] = {}
+
+    with zipfile.ZipFile(BytesIO(workbook_data)) as zf:
+        required_parts = (
+            "xl/metadata.xml",
+            "xl/richData/rdrichvalue.xml",
+            "xl/richData/richValueRel.xml",
+            "xl/richData/_rels/richValueRel.xml.rels",
+        )
+
+        if any(_zip_part_name(zf, part) is None for part in required_parts):
+            return images
+
+        worksheet_part = _first_worksheet_part(zf)
+        worksheet_root = _read_zip_xml(zf, worksheet_part)
+
+        # Cell vm is a 1-based index into valueMetadata.
+        image_cells: list[tuple[str, int]] = []
+
+        for cell in worksheet_root.findall(f".//{{{_XML_MAIN}}}c"):
+            cell_reference = cell.attrib.get("r")
+            metadata_index = cell.attrib.get("vm")
+
+            if not cell_reference or not metadata_index:
+                continue
+
+            try:
+                image_cells.append(
+                    (cell_reference, int(metadata_index) - 1)
+                )
+            except ValueError:
+                continue
+
+        if not image_cells:
+            return images
+
+        metadata_root = _read_zip_xml(zf, "xl/metadata.xml")
+        value_metadata = metadata_root.findall(
+            f"./{{{_XML_MAIN}}}valueMetadata/"
+            f"{{{_XML_MAIN}}}bk"
+        )
+        future_metadata = metadata_root.findall(
+            f"./{{{_XML_MAIN}}}futureMetadata/"
+            f"{{{_XML_MAIN}}}bk"
+        )
+
+        rich_values_root = _read_zip_xml(
+            zf,
+            "xl/richData/rdrichvalue.xml",
+        )
+        rich_values = rich_values_root.findall(
+            f"{{{_XML_RICH}}}rv"
+        )
+
+        rich_rel_root = _read_zip_xml(
+            zf,
+            "xl/richData/richValueRel.xml",
+        )
+        rich_relations = rich_rel_root.findall(
+            f"{{{_XML_RICH_REL}}}rel"
+        )
+
+        package_rel_root = _read_zip_xml(
+            zf,
+            "xl/richData/_rels/richValueRel.xml.rels",
+        )
+        relationship_targets = {
+            relationship.attrib["Id"]: relationship.attrib["Target"]
+            for relationship in package_rel_root.findall(
+                f"{{{_XML_PKG_REL}}}Relationship"
+            )
+        }
+
+        rich_relation_part = "xl/richData/richValueRel.xml"
+
+        for cell_reference, metadata_index in image_cells:
+            try:
+                # valueMetadata -> futureMetadata -> rich-value index.
+                rc = value_metadata[metadata_index].find(
+                    f"{{{_XML_MAIN}}}rc"
+                )
+                if rc is None:
+                    continue
+
+                future_index = int(rc.attrib["v"])
+                rich_value_binding = future_metadata[future_index].find(
+                    f".//{{{_XML_RICH}}}rvb"
+                )
+                if rich_value_binding is None:
+                    continue
+
+                rich_value_index = int(
+                    rich_value_binding.attrib["i"]
+                )
+                rich_value = rich_values[rich_value_index]
+                rich_value_fields = rich_value.findall(
+                    f"{{{_XML_RICH}}}v"
+                )
+
+                if not rich_value_fields:
+                    continue
+
+                # First field is an index into richValueRel.xml.
+                relation_index = int(rich_value_fields[0].text or "0")
+                description = (
+                    rich_value_fields[2].text
+                    if len(rich_value_fields) > 2
+                    and rich_value_fields[2].text
+                    else cell_reference
+                )
+
+                relation_id = rich_relations[relation_index].attrib[
+                    f"{{{_XML_DOC_REL}}}id"
+                ]
+                target = relationship_targets[relation_id]
+                media_part = _resolve_ooxml_target(
+                    rich_relation_part,
+                    target,
+                )
+                actual_media_part = _zip_part_name(zf, media_part)
+
+                if actual_media_part is None:
+                    continue
+
+                images[cell_reference] = (
+                    zf.read(actual_media_part),
+                    posixpath.basename(media_part),
+                    description,
+                )
+
+            except (
+                IndexError,
+                KeyError,
+                TypeError,
+                ValueError,
+                AttributeError,
+            ):
+                # A malformed rich-data entry shouldn't prevent the rest of
+                # the workbook from being merged.
+                continue
+
+    return images
+
+
+def _row_height_pixels(source_ws, row_number: int, has_image: bool) -> int:
+    """Convert an openpyxl row height in points to XlsxWriter pixels."""
+    row_dimension = source_ws.row_dimensions.get(row_number)
+
+    if row_dimension is not None and row_dimension.height:
+        return max(20, int(round(float(row_dimension.height) * 96 / 72)))
+
+    return 200 if has_image else 24
+
+
 def merge_excel_bytes(workbook_bytes: list[bytes]) -> bytes:
-    """Merge multiple broker .xlsx workbooks into one combined workbook."""
+    """
+    Merge extractor workbooks while preserving native in-cell images.
+
+    Source workbooks are read with openpyxl for ordinary cell values only.
+    Native images are extracted from the XLSX rich-data XML and embedded again
+    into a newly generated XlsxWriter workbook.
+    """
     if not workbook_bytes:
         raise ValueError("No workbooks provided for merging.")
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Warehouses"
+    output = BytesIO()
+    workbook = xlsxwriter.Workbook(output)
+    worksheet = workbook.add_worksheet("Warehouses")
 
-    header_fill = PatternFill("solid", fgColor="2F5597")
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    thin = Side(style="thin", color="BFBFBF")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    wrap_top = Alignment(wrap_text=True, vertical="top")
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    header_format = workbook.add_format({
+        "bold": True,
+        "align": "center",
+        "valign": "vcenter",
+        "text_wrap": True,
+        "fg_color": "#2F5597",
+        "font_color": "#FFFFFF",
+        "border": 1,
+    })
+    cell_format = workbook.add_format({
+        "align": "left",
+        "valign": "top",
+        "text_wrap": True,
+        "border": 1,
+    })
 
-    for c, name in enumerate(COLUMNS, start=1):
-        cell = ws.cell(row=1, column=c, value=name)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = center
-        cell.border = border
+    for column_zero_based, name in enumerate(COLUMNS):
+        worksheet.write(
+            0,
+            column_zero_based,
+            name,
+            header_format,
+        )
+
+    worksheet.set_row_pixels(0, 24)
+
+    column_index = {
+        name: index
+        for index, name in enumerate(COLUMNS)
+    }
+    image_column_indexes = {
+        column_index["공실현황"],
+        column_index["사진"],
+    }
 
     default_widths = {
-        "사용가능여부": 12, "중개인/임대인명": 14, "창고명": 26, "주소": 26,
-        "행정구역_도": 14, "행정구역_시": 12, "대지면적": 20, "연면적": 20,
-        "건축면적": 14, "준공연도": 12, "시설특이사항": 38, "기타": 12,
+        "사용가능여부": 12,
+        "중개인/임대인명": 14,
+        "창고명": 26,
+        "주소": 26,
+        "행정구역_도": 14,
+        "행정구역_시": 12,
+        "대지면적": 20,
+        "연면적": 20,
+        "건축면적": 14,
+        "준공연도": 12,
+        "공실현황": 51.43,
+        "시설특이사항": 38,
+        "기타": 12,
         "정보확인일자": 14,
+        "사진": 51.43,
     }
-    col_index = {name: i + 1 for i, name in enumerate(COLUMNS)}
-    for name, width in default_widths.items():
-        ws.column_dimensions[get_column_letter(col_index[name])].width = width
+    maximum_widths = dict(default_widths)
 
-    row_offset = 2
-    for workbook_data in workbook_bytes:
-        src_wb = load_workbook(filename=BytesIO(workbook_data), data_only=True)
-        src_ws = src_wb.active
-        header = [cell.value for cell in src_ws[1]]
-        if header != COLUMNS:
-            raise ValueError("Cannot merge workbooks with incompatible headers.")
+    # XlsxWriter needs these streams to remain alive until workbook.close().
+    image_streams: list[BytesIO] = []
+    destination_row_zero_based = 1
 
-        rows_before = row_offset - 2
-        for src_row_idx, row_values in enumerate(src_ws.iter_rows(min_row=2, values_only=True), start=2):
-            dst_row = rows_before + src_row_idx
-            for col, value in enumerate(row_values, start=1):
-                cell = ws.cell(row=dst_row, column=col, value=value)
-                cell.alignment = wrap_top
-                cell.border = border
-            src_dim = src_ws.row_dimensions.get(src_row_idx)
-            if src_dim and src_dim.height:
-                ws.row_dimensions[dst_row].height = src_dim.height
-            row_offset += 1
+    try:
+        for source_data in workbook_bytes:
+            source_workbook = load_workbook(
+                filename=BytesIO(source_data),
+                data_only=False,
+                read_only=False,
+            )
+            source_ws = source_workbook.active
 
-        for col_letter, dim in src_ws.column_dimensions.items():
-            if dim and getattr(dim, "width", None) is not None:
-                current_width = ws.column_dimensions[col_letter].width or 0
-                ws.column_dimensions[col_letter].width = max(current_width, dim.width)
+            source_header = [
+                source_ws.cell(row=1, column=column).value
+                for column in range(1, len(COLUMNS) + 1)
+            ]
 
-        for img in getattr(src_ws, "_images", []):
-            try:
-                anchor = img.anchor
-                src_row = anchor._from.row + 1
-                src_col = anchor._from.col + 1
-                dst_row = rows_before + src_row
-                if dst_row >= 2:
-                    if hasattr(img.ref, "seek"):
-                        img.ref.seek(0)
-                    image_bytes = img.ref.read() if hasattr(img.ref, "read") else None
-                    merged_image = XLImage(BytesIO(image_bytes) if image_bytes is not None else img.path)
+            if source_header != COLUMNS:
+                raise ValueError(
+                    "Cannot merge workbooks with incompatible headers."
+                )
 
-                    try:
-                        merged_anchor = TwoCellAnchor(editAs="twoCell")
-                        merged_anchor._from = AnchorMarker(col=src_col - 1, row=dst_row - 1, colOff=0, rowOff=0)
-                        merged_anchor.to = AnchorMarker(col=src_col, row=dst_row, colOff=0, rowOff=0)
-                        merged_image.anchor = merged_anchor
-                    except Exception:
-                        try:
-                            merged_image.anchor = f"{get_column_letter(src_col)}{dst_row}"
-                        except Exception:
-                            pass
+            source_images = extract_in_cell_images(source_data)
 
-                    ws.add_image(merged_image)
-            except Exception:
-                continue
+            # Preserve the widest source column for each field.
+            for column_one_based, name in enumerate(COLUMNS, start=1):
+                column_letter = get_column_letter(column_one_based)
+                dimension = source_ws.column_dimensions.get(column_letter)
 
-    ws.freeze_panes = "A2"
-    out = BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out.read()
+                if dimension is not None and dimension.width:
+                    maximum_widths[name] = max(
+                        maximum_widths.get(name, 0),
+                        float(dimension.width),
+                    )
+
+            for source_row in range(2, source_ws.max_row + 1):
+                image_refs = {
+                    column_zero_based: (
+                        f"{get_column_letter(column_zero_based + 1)}"
+                        f"{source_row}"
+                    )
+                    for column_zero_based in image_column_indexes
+                }
+
+                has_image = any(
+                    reference in source_images
+                    for reference in image_refs.values()
+                )
+
+                normal_values = [
+                    source_ws.cell(
+                        row=source_row,
+                        column=column_zero_based + 1,
+                    ).value
+                    for column_zero_based in range(len(COLUMNS))
+                    if column_zero_based not in image_column_indexes
+                ]
+
+                # Ignore completely empty source rows.
+                if not has_image and not any(
+                    value not in (None, "")
+                    for value in normal_values
+                ):
+                    continue
+
+                for column_zero_based, name in enumerate(COLUMNS):
+                    if column_zero_based in image_column_indexes:
+                        continue
+
+                    value = source_ws.cell(
+                        row=source_row,
+                        column=column_zero_based + 1,
+                    ).value
+
+                    worksheet.write(
+                        destination_row_zero_based,
+                        column_zero_based,
+                        value,
+                        cell_format,
+                    )
+
+                for column_zero_based in image_column_indexes:
+                    source_reference = image_refs[column_zero_based]
+                    image_info = source_images.get(source_reference)
+
+                    if image_info is None:
+                        # Never copy the source #VALUE! placeholder.
+                        worksheet.write_blank(
+                            destination_row_zero_based,
+                            column_zero_based,
+                            None,
+                            cell_format,
+                        )
+                        continue
+
+                    image_bytes, filename, description = image_info
+                    image_kind = COLUMNS[column_zero_based]
+                    image_bytes, filename = _optimize_image_bytes(
+                        image_bytes,
+                        image_kind,
+                        filename,
+                    )
+                    image_stream = BytesIO(image_bytes)
+                    image_streams.append(image_stream)
+
+                    result = worksheet.embed_image(
+                        destination_row_zero_based,
+                        column_zero_based,
+                        filename,
+                        {
+                            "image_data": image_stream,
+                            "description": description,
+                            "cell_format": cell_format,
+                        },
+                    )
+
+                    if result != 0:
+                        raise RuntimeError(
+                            "Could not embed image from "
+                            f"{source_reference}."
+                        )
+
+                worksheet.set_row_pixels(
+                    destination_row_zero_based,
+                    _row_height_pixels(
+                        source_ws,
+                        source_row,
+                        has_image,
+                    ),
+                )
+                destination_row_zero_based += 1
+
+            source_workbook.close()
+
+        for column_zero_based, name in enumerate(COLUMNS):
+            worksheet.set_column(
+                column_zero_based,
+                column_zero_based,
+                maximum_widths[name],
+            )
+
+        worksheet.freeze_panes(1, 0)
+        workbook.close()
+
+    except Exception:
+        # Avoid returning a partially written workbook.
+        try:
+            workbook.close()
+        except Exception:
+            pass
+        raise
+
+    output.seek(0)
+    return output.read()
 
 
 # ---------------------------------------------------------------------------
@@ -1434,18 +2186,16 @@ def extract_records(doc: "fitz.Document", img_dir: str, dpi: int = 300,
     os.makedirs(img_dir, exist_ok=True)
     template = get_template(template_name)
 
-    mateplus_address_titles: dict[str, str] = {}
-    mateplus_ordered_titles: list[str] = []
-    mateplus_title_index = 0
+    mateplus_address_titles: dict[str, set[str]] = {}
 
     if (
         template.get("name") == "Mateplus"
         and template.get("TITLE_SOURCE") == "index"
     ):
-        (
-            mateplus_address_titles,
-            mateplus_ordered_titles,
-        ) = _extract_mateplus_index(doc, template)
+        mateplus_address_titles = _extract_mateplus_index(
+            doc,
+            template,
+        )
 
     records: list[dict] = []
     skipped = 0
@@ -1459,33 +2209,18 @@ def extract_records(doc: "fitz.Document", img_dir: str, dpi: int = 300,
             rec = extract_page(render_page(page, dpi), i, img_dir, template, crop_dpi=img_dpi)
         else:
             skipped += 1
-        if rec is not None and template.get("name") == "Mateplus":
-            address_key = _normalize_index_address(rec.get("주소", ""))
-            index_title = mateplus_address_titles.get(address_key, "")
-
-            if not index_title:
-                for saved_address, saved_title in mateplus_address_titles.items():
-                    if (
-                        saved_address
-                        and address_key
-                        and (
-                            saved_address in address_key
-                            or address_key in saved_address
-                        )
-                    ):
-                        index_title = saved_title
-                        break
-
-            if (
-                not index_title
-                and mateplus_title_index < len(mateplus_ordered_titles)
-            ):
-                index_title = mateplus_ordered_titles[mateplus_title_index]
-
-            if index_title:
-                rec["창고명"] = index_title
-
-            mateplus_title_index += 1
+        if (
+            rec is not None
+            and template.get("name") == "Mateplus"
+            and template.get("TITLE_SOURCE") == "index"
+        ):
+            # Strict business-data rule:
+            # unique confident address match -> title;
+            # otherwise leave blank. Never guess from page order.
+            rec["창고명"] = _match_mateplus_index_title(
+                rec.get("주소", ""),
+                mateplus_address_titles,
+            )
 
         if rec is not None:
             records.append(rec)
