@@ -38,7 +38,6 @@ import re
 import shutil
 import sys
 import zipfile
-from collections import Counter
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from copy import deepcopy
@@ -79,9 +78,7 @@ GI_FIELDS = ["소재지", "인근IC", "건폐율/용적률", "대지면적",
 # Common label synonyms that appear in some broker templates -> canonical GI_FIELDS
 GI_SYNONYMS = {
     "주소": "소재지",
-    "주소지": "소재지",
     "위치": "소재지",
-    "소재": "소재지",
     "소재지위치": "소재지",
     "주소및위치": "소재지",
     "준공시기": "준공년도",
@@ -309,11 +306,9 @@ def parse_region(address: str) -> tuple[str, str]:
             do, addr = canonical, addr[len(matched):]
             break
     si = ""
-    m = re.search(r"([가-힣]+?(?:시|군|구))(?:([가-힣]+구))?", addr)
+    m = re.search(r"([가-힣]+?(?:시|군|구))", addr)
     if m:
         si = m.group(1)
-        if m.group(2):
-            si = f"{si} {m.group(2)}"
     return do, si
 
 
@@ -398,171 +393,6 @@ def content_bbox(img: Image.Image, box_px, white: int = 235, pad: int = 6):
 # ---------------------------------------------------------------------------
 # Per-page extraction
 # ---------------------------------------------------------------------------
-def _repair_cbre_mixed_latin_title(
-    title_crop: Image.Image,
-    title: str,
-    template: dict,
-) -> str:
-    """Rebuild CBRE titles and repair low-confidence Latin codes such as JW."""
-    if template.get("name") != "CBRE":
-        return title
-
-    try:
-        data = pytesseract.image_to_data(
-            title_crop,
-            lang=template.get("OCR_LANG", OCR_LANG),
-            config="--psm 7",
-            output_type=pytesseract.Output.DICT,
-        )
-    except Exception:
-        return title
-
-    tokens: list[str] = []
-    did_repair = False
-    for index, raw in enumerate(data.get("text", [])):
-        word = str(raw).strip()
-        if not word:
-            continue
-
-        # Exclude the visual exclusivity badge from the warehouse name.
-        if "전속" in word:
-            continue
-
-        try:
-            confidence = float(data["conf"][index])
-        except (TypeError, ValueError):
-            confidence = -1
-
-        repaired = word
-        if (
-            confidence < 60
-            and re.search(r"[^가-힣A-Za-z]", word)
-            and "물" not in word
-        ):
-            left = max(0, int(data["left"][index]) - 12)
-            top = max(0, int(data["top"][index]) - 12)
-            right = min(
-                title_crop.width,
-                int(data["left"][index]) + int(data["width"][index]) + 12,
-            )
-            bottom = min(
-                title_crop.height,
-                int(data["top"][index]) + int(data["height"][index]) + 12,
-            )
-            token_crop = title_crop.crop((left, top, right, bottom))
-            try:
-                latin = pytesseract.image_to_string(
-                    token_crop,
-                    lang="eng",
-                    config="--psm 7",
-                )
-                latin = re.sub(r"[^A-Za-z0-9]", "", latin).upper()
-                if re.fullmatch(r"[A-Z]{2,6}", latin):
-                    repaired = latin
-                    did_repair = True
-            except Exception:
-                pass
-
-        tokens.append(repaired)
-
-    if not did_repair:
-        return _normalize_title_candidate(title, template)
-
-    compact = re.sub(r"\s+", "", "".join(tokens))
-    compact = re.sub(r"\[?전속\]?", "", compact)
-    if "물류센터" not in compact:
-        return title
-
-    prefix, suffix = compact.split("물류센터", 1)
-    prefix = re.sub(r"([가-힣])([A-Z])", r"\1 \2", prefix)
-    prefix = re.sub(r"([A-Z])([가-힣])", r"\1 \2", prefix)
-    # Keep short building codes attached to the location, e.g. 화성JW.
-    prefix = re.sub(r"^([가-힣]+)\s+([A-Z]{2,4})$", r"\1\2", prefix)
-
-    suffix = suffix.strip()
-    suffix = re.sub(r"^(\d+)차부지", r"\1차 부지", suffix)
-    suffix = re.sub(r"^(\d+)차", r"\1차 ", suffix)
-    suffix = re.sub(r"\s+", " ", suffix).strip()
-
-    rebuilt = f"{prefix.strip()} 물류센터"
-    if suffix:
-        rebuilt += f" {suffix}"
-
-    rebuilt = _normalize_title_candidate(rebuilt, template)
-    return rebuilt if _is_valid_title(rebuilt, template) else title
-
-
-def _extract_title_from_image(img: Image.Image, template: dict) -> str:
-    """OCR and validate only the configured title region of an image page."""
-    w, h = img.size
-    title_box = _px(template.get("TITLE_BOX", TITLE_BOX), w, h)
-    crop = ImageOps.autocontrast(img.crop(title_box).convert("L"))
-
-    candidates: list[str] = []
-    psm_values = template.get("TITLE_OCR_PSMS", [7, 6, 11])
-    for psm in dict.fromkeys(int(value) for value in psm_values):
-        try:
-            raw = ocr(
-                crop,
-                psm=psm,
-                lang=template.get("OCR_LANG", OCR_LANG),
-                scale=int(template.get("TITLE_OCR_SCALE", 2)),
-            )
-        except Exception:
-            continue
-
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
-        candidates.extend(lines)
-        if lines:
-            candidates.append(" ".join(lines))
-
-    title = _best_title_candidate(candidates, template)
-    if title:
-        title = _repair_cbre_mixed_latin_title(crop, title, template)
-    return title
-
-
-def _is_ocr_property_page(img: Image.Image, template: dict) -> bool:
-    """Reject image-only cover/index/drawing pages before full extraction."""
-    title = _extract_title_from_image(img, template)
-    if not title:
-        return False
-
-    markers = template.get("OCR_PAGE_MARKERS", [])
-    if not markers:
-        return True
-
-    w, h = img.size
-    matched = 0
-    for marker in markers:
-        try:
-            marker_box = _px(marker["box"], w, h)
-            marker_img = ImageOps.autocontrast(
-                img.crop(marker_box).convert("L")
-            )
-            marker_text = ocr(
-                marker_img,
-                psm=int(marker.get("psm", 11)),
-                lang=template.get("OCR_LANG", OCR_LANG),
-                scale=int(marker.get("scale", 2)),
-            )
-        except Exception:
-            continue
-
-        compact = re.sub(r"\s+", "", marker_text).lower()
-        tokens = marker.get("tokens", [])
-        if any(re.sub(r"\s+", "", token).lower() in compact for token in tokens):
-            matched += 1
-
-    required_min = int(template.get("OCR_PAGE_REQUIRED_MIN", len(markers)))
-    if matched >= required_min:
-        return True
-
-    # Some valid image-only property pages only OCR one of the expected
-    # marker regions, especially when the second heading is faint or broken.
-    return matched >= 1
-
-
 def extract_page(img: Image.Image, page_idx: int, img_dir: str,
                  template: dict, crop_dpi: int = 150) -> dict:
     w, h = img.size
@@ -600,12 +430,6 @@ def extract_page(img: Image.Image, page_idx: int, img_dir: str,
                         fld = canonical_field(parts[0].strip())
                         if fld:
                             values.setdefault(fld, _strip_noise(parts[1].strip()))
-                    else:
-                        parts = re.match(r"^([^:：\t]+?)\s+(.+)$", ln)
-                        if parts:
-                            fld = canonical_field(parts.group(1).strip())
-                            if fld:
-                                values.setdefault(fld, _strip_noise(parts.group(2).strip()))
             j += 1
     else:
         for i in range(len(rows) - 1):
@@ -714,11 +538,11 @@ def extract_page(img: Image.Image, page_idx: int, img_dir: str,
     year = clean_year(values.get("준공년도", "")) or "미정"
 
     # --- Title (창고명) ----------------------------------------------------
-    title = _extract_title_from_image(img, template)
+    title_box = _px(template.get("TITLE_BOX", TITLE_BOX), w, h)
+    title = clean_title(ocr(img.crop(title_box), psm=7,
+                            lang=template.get("OCR_LANG", OCR_LANG), scale=2))
     if template.get("name") == "Mateplus" and not title:
         title = _title_from_address(address, template)
-    if not _is_valid_title(title, template):
-        title = ""
 
     # --- 시설특이사항 (facility spec / 비고 cell) ------------------------
     spec = ""
@@ -891,85 +715,18 @@ def _extract_spec_from_box(page: "fitz.Page", template: dict) -> str:
     return "\n".join(spec_lines).strip()
 
 
-def _normalize_title_spacing(title: str) -> str:
-    title = re.sub(r"\s*\(\s*", " (", title)
-    title = re.sub(r"\s*\)\s*", ") ", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    title = re.sub(r"([가-힣])([A-Za-z0-9])", r"\1 \2", title)
-    title = re.sub(r"([A-Za-z0-9])([가-힣])", r"\1 \2", title)
-    title = re.sub(
-        r"([가-힣])(?=(물류센터|센터|빌딩|타워|플라자|파크|폴리스|로지스|로지스틱스|서비스|물류|비즈|밸리))",
-        r"\1 ",
-        title,
-    )
-    title = re.sub(r"물류\s*센터", "물류센터", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
-
-
-def _normalize_title_candidate(title: str, template: dict) -> str:
-    """Normalize a title candidate without changing unrelated field values."""
+def _is_valid_title(title: str, template: dict) -> bool:
+    """Reject table values and section headers that cannot be warehouse names."""
     title = clean_title(title or "")
     if not title:
-        return ""
-
-    # Exclusivity badges are metadata, not part of the warehouse name.
-    title = re.sub(r"\s*\[\s*전속[^\]]*\]\s*", " ", title)
-    title = re.sub(r"\s+", " ", title).strip(" .,-")
-
-    # Mapletree puts the nearest-IC distance on the same visual title line.
-    # Every Mapletree warehouse title itself ends at '물류센터'.
-    if template.get("name") == "Mapletree Korea" and "물류센터" in title:
-        end = title.find("물류센터") + len("물류센터")
-        title = title[:end].strip()
-
-    if template.get("name") == "S1":
-        # S1 places a small region badge above the title. OCR modes that treat
-        # the crop as a block can join it to the actual warehouse name.
-        title = re.sub(
-            r"^\s*\[[^\]]*(?:권|전속)[^\]]*\]\s*",
-            "",
-            title,
-        )
-
-        # Red NEW labels are sometimes OCR'd as short Latin fragments after
-        # the temperature suffix. Keep the title only through (상온/저온).
-        temperature_title = re.match(
-            r"^(.+?\((?:상온|저온)(?:\s*/\s*(?:상온|저온))?\))",
-            title,
-        )
-        if temperature_title:
-            title = temperature_title.group(1)
-
-        title = re.sub(r"\s*/\s*", "/", title)
-        title = re.sub(r"\s+", " ", title).strip()
-
-    title = _normalize_title_spacing(title)
-    return clean_title(title)
-
-
-def _is_valid_title(title: str, template: dict) -> bool:
-    """Reject broker slogans, table values, and section headers."""
-    title = _normalize_title_candidate(title, template)
-    if not title:
         return False
 
-    common_reject = (
-        "%", "㎡", "용적률", "건폐율",
+    if any(token in title for token in (
+        "%", "㎡", "평", "용적률", "건폐율",
         "GENERAL INFORMATION", "SPACE AVAILABILITY",
         "PERSPECTIVE VIEW", "LOCATION", "LAYOUT",
-        "Contact Point", "TABLE OF CONTENTS",
-    )
-    upper_title = title.upper()
-    if any(str(token).upper() in upper_title for token in common_reject):
-        return False
-    # Reject area values such as "12,477평" without rejecting valid place
-    # names such as "평택 물류센터".
-    if re.search(r"\d[\d,.]*\s*(?:평|㎡)", title):
-        return False
-
-    reject_tokens = template.get("TITLE_REJECT_TOKENS", [])
-    if any(str(token).upper() in upper_title for token in reject_tokens):
+        "Contact Point",
+    )):
         return False
 
     compact = re.sub(r"\s+", "", title)
@@ -980,14 +737,6 @@ def _is_valid_title(title: str, template: dict) -> bool:
 
     required = template.get("TITLE_REQUIRED_TOKENS", [])
     if required and not any(token in title for token in required):
-        if not template.get("TITLE_REQUIRED_TOKENS_OPTIONAL", False):
-            return False
-
-    required_patterns = template.get("TITLE_REQUIRED_PATTERNS", [])
-    if required_patterns and not any(
-        re.search(pattern, title, flags=re.IGNORECASE)
-        for pattern in required_patterns
-    ):
         return False
 
     return True
@@ -995,7 +744,7 @@ def _is_valid_title(title: str, template: dict) -> bool:
 
 def _title_score(title: str, template: dict) -> int:
     """Rank valid candidates while preserving all existing broker templates."""
-    title = _normalize_title_candidate(title, template)
+    title = clean_title(title or "")
     if not _is_valid_title(title, template):
         return -1
 
@@ -1058,49 +807,16 @@ def _words_centered_in_box_lines(page: "fitz.Page", box: dict) -> list[str]:
 
 
 def _best_title_candidate(candidates: list[str], template: dict) -> str:
-    """
-    Select the most reliable title candidate.
-
-    OCR is run with multiple PSM modes. A malformed PSM result can be longer
-    than the correct title and previously won only because title length added
-    points. Prefer candidates independently confirmed by multiple OCR modes,
-    then apply the normal title-quality score.
-    """
-    normalized_candidates = [
-        _normalize_title_candidate(candidate, template)
-        for candidate in candidates
+    scored = [
+        (_title_score(candidate, template), index, candidate)
+        for index, candidate in enumerate(candidates)
     ]
-    normalized_candidates = [
-        candidate
-        for candidate in normalized_candidates
-        if _is_valid_title(candidate, template)
-    ]
-    if not normalized_candidates:
+    scored = [item for item in scored if item[0] >= 0]
+    if not scored:
         return ""
 
-    frequencies = Counter(normalized_candidates)
-    first_index: dict[str, int] = {}
-    for index, candidate in enumerate(normalized_candidates):
-        first_index.setdefault(candidate, index)
-
-    scored: list[tuple[int, int, str]] = []
-    for candidate, frequency in frequencies.items():
-        score = _title_score(candidate, template)
-
-        # Consensus between OCR modes is much more trustworthy than length.
-        score += max(0, frequency - 1) * 250
-
-        # Strong signs of fragmented OCR. Valid warehouse titles may contain
-        # digits, but copyright symbols and several isolated tokens are noise.
-        if re.search(r"[©®™]", candidate):
-            score -= 1000
-        if len(re.findall(r"(?<!\w)[A-Za-z0-9](?!\w)", candidate)) >= 3:
-            score -= 400
-
-        scored.append((score, first_index[candidate], candidate))
-
     scored.sort(key=lambda item: (-item[0], item[1]))
-    return scored[0][2]
+    return clean_title(scored[0][2])
 
 
 def _title_from_top_region(page: "fitz.Page", template: dict) -> str:
@@ -1569,9 +1285,9 @@ def _select_title_from_box(page: "fitz.Page", template: dict,
     except Exception:
         pass
 
-    # Some brokers render the title as vector outlines/image content.
-    # OCR only the configured title box when the template explicitly allows it.
-    if template.get("TITLE_OCR_FALLBACK", template.get("name") == "Mateplus"):
+    # MatePlus sometimes renders the visible title as vector outlines rather
+    # than selectable PDF text. OCR only the title box in that case.
+    if template.get("name") == "Mateplus":
         title = _extract_title_with_ocr(page, template)
         if title:
             return title
@@ -2494,17 +2210,13 @@ def extract_records(doc: "fitz.Document", img_dir: str, dpi: int = 300,
             and len(text.strip()) < 50
             and ocr_ready
         ):
-            rendered_page = render_page(page, dpi)
-            if _is_ocr_property_page(rendered_page, template):
-                rec = extract_page(
-                    rendered_page,
-                    i,
-                    img_dir,
-                    template,
-                    crop_dpi=img_dpi,
-                )
-            else:
-                skipped += 1
+            rec = extract_page(
+                render_page(page, dpi),
+                i,
+                img_dir,
+                template,
+                crop_dpi=img_dpi,
+            )
         else:
             # MatePlus property pages already contain selectable text.
             # Never OCR its cover/SITE PLAN pages, because Streamlit Cloud has

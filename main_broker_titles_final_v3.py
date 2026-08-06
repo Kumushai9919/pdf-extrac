@@ -891,22 +891,6 @@ def _extract_spec_from_box(page: "fitz.Page", template: dict) -> str:
     return "\n".join(spec_lines).strip()
 
 
-def _normalize_title_spacing(title: str) -> str:
-    title = re.sub(r"\s*\(\s*", " (", title)
-    title = re.sub(r"\s*\)\s*", ") ", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    title = re.sub(r"([가-힣])([A-Za-z0-9])", r"\1 \2", title)
-    title = re.sub(r"([A-Za-z0-9])([가-힣])", r"\1 \2", title)
-    title = re.sub(
-        r"([가-힣])(?=(물류센터|센터|빌딩|타워|플라자|파크|폴리스|로지스|로지스틱스|서비스|물류|비즈|밸리))",
-        r"\1 ",
-        title,
-    )
-    title = re.sub(r"물류\s*센터", "물류센터", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
-
-
 def _normalize_title_candidate(title: str, template: dict) -> str:
     """Normalize a title candidate without changing unrelated field values."""
     title = clean_title(title or "")
@@ -944,7 +928,6 @@ def _normalize_title_candidate(title: str, template: dict) -> str:
         title = re.sub(r"\s*/\s*", "/", title)
         title = re.sub(r"\s+", " ", title).strip()
 
-    title = _normalize_title_spacing(title)
     return clean_title(title)
 
 
@@ -980,8 +963,7 @@ def _is_valid_title(title: str, template: dict) -> bool:
 
     required = template.get("TITLE_REQUIRED_TOKENS", [])
     if required and not any(token in title for token in required):
-        if not template.get("TITLE_REQUIRED_TOKENS_OPTIONAL", False):
-            return False
+        return False
 
     required_patterns = template.get("TITLE_REQUIRED_PATTERNS", [])
     if required_patterns and not any(
