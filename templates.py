@@ -258,6 +258,119 @@ TEMPLATES = {
         "SPEC_FIELD": "기타",
         "OCR_LANG": "kor+eng",
     },
+
+    "RSQUARE": {
+    "name": "RSQUARE",
+    "label": "RSQUARE",
+
+    "keywords": [
+        "RSQUARE",
+        "물류센터",
+        "조감도",
+        "물류센터 개요",
+        "건축도면",
+        "층별정보",
+    ],
+
+    # Make sure this exact RSQUARE layout/page is selected
+    "PAGE_REQUIRED_TOKENS": [
+        "물류센터 개요",
+        "위치",
+        "대지면적",
+        "연면적",
+        "사용승인일",
+        "층별정보",
+    ],
+    "PAGE_REQUIRED_MIN": 4,
+
+    # General information table
+    # Actual area:
+    # x ≈ 344~674 / 1035
+    # y ≈ 132~389 / 699
+    "GI_BOX": {
+        "x0": 0.330,
+        "x1": 0.655,
+        "y0": 0.185,
+        "y1": 0.560,
+    },
+
+    # Value column starts around x=432px
+    "GI_VALUE_X": 0.417,
+
+    "GI_FIELDS": [
+        "위치",
+        "대지면적",
+        "연면적",
+        "센터 규모",
+        "사용승인일",
+        "총 주차 대수",
+        "건폐율",
+        "용적률",
+        "건축물 용도",
+        "주 출입구 방향",
+        "층당 화장실 개수",
+        "IC",
+    ],
+
+    # Title: 이천 대월면 물류센터
+    "TITLE_BOX": {
+        "x0": 0.020,
+        "x1": 0.350,
+        "y0": 0.055,
+        "y1": 0.135,
+    },
+
+    "TITLE_REQUIRED_TOKENS": [
+        "물류센터",
+    ],
+
+    "TITLE_REQUIRED_TOKENS_OPTIONAL": True,
+
+    "TITLE_REJECT_TOKENS": [
+        "Master Of Value Enhancement",
+        "Leasing Information",
+        "공실 요약",
+        "동남권",
+    ],
+
+    "TITLE_OCR_PSMS": [7, 6, 11],
+    "TITLE_OCR_SCALE": 2,
+
+    # Exterior building image only
+    "PHOTO_BOX": {
+        "x0": 0.000,
+        "x1": 0.320,
+        "y0": 0.185,
+        "y1": 0.560,
+    },
+
+    # Bottom 층별정보 table
+    "SPACE_BOX": {
+        "x0": 0.330,
+        "x1": 0.985,
+        "y0": 0.590,
+        "y1": 0.975,
+    },
+
+    "SPACE_PAD": {
+        "left": 0.0,
+        "right": 0.0,
+        "top": 0.0,
+        "bottom": 0.0,
+    },
+
+    # 특이사항 column on far right
+    "SPEC_BOX": {
+        "x0": 0.895,
+        "x1": 0.985,
+        "y0": 0.595,
+        "y1": 0.970,
+    },
+
+    "SPEC_FIELD": "특이사항",
+
+    "OCR_LANG": "kor+eng",
+},
 }
 
 DEFAULT_TEMPLATE = "MOVE"
